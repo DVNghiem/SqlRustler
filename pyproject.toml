@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sqlrustler"
+version = "0.1.0"
+description = "A Fast Async Python backend with a Rust runtime."
+authors = [{ name = "Martin Dang", email = "vannghiem848@gmail.com" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[tool.poetry]
+name = "sqlrustler"
+version = "0.1.0"
+description = "A Fast Async Python backend with a Rust runtime."
+authors = ["Martin Dang <vannghiem848@gmail.com>"]

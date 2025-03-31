@@ -1,0 +1,31 @@
+[package]
+name = "sqlrustler"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "sqlrustler"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24.0", features = ["extension-module"] }
+serde_json = "1.0.109"
+uuid = {version = "*", features = ["v4"]}
+tokio = { version = "*", features = ["full"] }
+once_cell = "1.8"
+chrono = "0.4.38"
+chrono-tz = "0.10.0"
+futures = "0.3.31"
+tracing = "0.1"
+sqlx = { version = "0.8", features = ["runtime-async-std", "postgres", "mysql", "sqlite", "chrono", "json"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true
+
+[package.metadata.maturin]
+name = "sqlrustler"
+python-source = "sqlrustler"
