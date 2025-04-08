@@ -10,12 +10,6 @@ pub trait DynamicParameterBinder {
     type Database: Database;
     type Row;
 
-    fn convert_sql_params<'q>(
-        &self,
-        query: &str,
-        params: Vec<&'q PyAny>,
-    ) -> Result<(String, Vec<&'q PyAny>), PyErr>;
-
     fn bind_parameters<'q>(
         &self,
         query: &'q str,

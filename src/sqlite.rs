@@ -13,11 +13,7 @@ use tokio::sync::Mutex;
 
 pub struct SqliteParameterBinder;
 
-impl DynamicParameterBinder for SqliteParameterBinder {
-    type Arguments = SqliteArguments<'static>;
-    type Database = Sqlite;
-    type Row = SqliteRow;
-
+impl SqliteParameterBinder {
     fn convert_sql_params<'q>(
         &self,
         query: &str,
@@ -42,6 +38,14 @@ impl DynamicParameterBinder for SqliteParameterBinder {
         Ok((converted_query, param_values))
     }
 
+}
+
+impl DynamicParameterBinder for SqliteParameterBinder {
+    type Arguments = SqliteArguments<'static>;
+    type Database = Sqlite;
+    type Row = SqliteRow;
+
+    
     fn bind_parameters<'q>(
         &self,
         query: &'q str,

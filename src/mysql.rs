@@ -1,12 +1,9 @@
-use std::sync::Arc;
 use regex::Regex;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use futures::StreamExt;
-use pyo3::{
-    prelude::*,
-    types::PyDict,
-};
+use pyo3::{prelude::*, types::PyDict};
 use sqlx::{
     mysql::{MySqlArguments, MySqlRow},
     Column, Row, ValueRef,
@@ -16,11 +13,7 @@ use super::db_trait::{DatabaseOperations, DynamicParameterBinder};
 // Similarly implement for other database types...
 pub struct MySqlParameterBinder;
 
-impl DynamicParameterBinder for MySqlParameterBinder {
-    type Arguments = MySqlArguments;
-    type Database = sqlx::MySql;
-    type Row = MySqlRow;
-
+impl MySqlParameterBinder {
     fn convert_sql_params<'q>(
         &self,
         query: &str,
@@ -44,6 +37,12 @@ impl DynamicParameterBinder for MySqlParameterBinder {
 
         Ok((converted_query, param_values))
     }
+}
+
+impl DynamicParameterBinder for MySqlParameterBinder {
+    type Arguments = MySqlArguments;
+    type Database = sqlx::MySql;
+    type Row = MySqlRow;
 
     fn bind_parameters<'q>(
         &self,
