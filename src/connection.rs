@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::context::{get_runtime, set_sql_connect};
+
 use super::{
     config::DatabaseConfig,
     postgresql::PostgresDatabase,
@@ -7,6 +9,7 @@ use super::{
     sqlite::SqliteDatabase,
     transaction::{DatabaseTransaction, DatabaseTransactionType},
 };
+use pyo3::prelude::*;
 use sqlx::{Error as SqlxError, Pool};
 use sqlx::{MySql, Postgres, Sqlite};
 use tokio::sync::Mutex;
@@ -18,13 +21,12 @@ enum DatabaseType {
     Sqlite(Arc<Pool<sqlx::Sqlite>>),
 }
 
-
 #[derive(Clone)]
-pub struct DatabaseConnection {
+pub struct __Connection {
     connection: DatabaseType,
 }
 
-impl DatabaseConnection {
+impl __Connection {
     pub async fn new(config: DatabaseConfig) -> Self {
         let connection = match config.driver {
             super::config::DatabaseType::Postgres => {
@@ -82,7 +84,7 @@ impl DatabaseConnection {
     }
 
     pub async fn begin_transaction(&self) -> Option<Box<dyn std::any::Any + Send>> {
-        
+
         match &self.connection {
             DatabaseType::Postgres(pool) => {
                 let transaction: sqlx::Transaction<Postgres> = pool.begin().await.ok()?;
@@ -97,5 +99,21 @@ impl DatabaseConnection {
                 Some(Box::new(transaction))
             }
         }
+    }
+}
+
+#[derive(Clone)]
+#[pyclass]
+pub struct DatabaseConnection;
+
+#[pymethods]
+impl DatabaseConnection {
+
+    #[staticmethod]
+    pub fn connect(config: DatabaseConfig) {
+        get_runtime().block_on(async move {
+            let database = __Connection::new(config).await;
+            set_sql_connect(database);
+        });
     }
 }

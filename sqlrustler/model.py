@@ -1,9 +1,7 @@
 import re
 from datetime import date, datetime
 
-from hypern.config import context_store
 from sqlrustler.exceptions import OutOfScopeApplicationException
-from hypern.hypern import get_session_database
 
 from .field import Field, ForeignKeyField
 from .query import QuerySet
@@ -50,14 +48,6 @@ class Model(metaclass=MetaModel):
                 self._data[key] = value
             else:
                 raise ValueError(f"Unknown field {key}")
-
-    @classmethod
-    def get_session(cls):
-        try:
-            context_id = context_store.get_context()
-        except Exception:
-            raise OutOfScopeApplicationException("Context not set")
-        return get_session_database(context_id)
 
     @classmethod
     def objects(cls) -> QuerySet:

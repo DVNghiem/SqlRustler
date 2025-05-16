@@ -3,10 +3,10 @@ from enum import Enum
 from typing import Any, Dict, List
 
 
-class DatabaseType(Enum):
-    Postgres: str
-    MySQL: str
-    SQLite: str
+class DatabaseType(Enum, str):
+    Postgres = "POSTGRESQL"
+    MySQL = "MYSQL"
+    SQLite = "SQLITE"
 
 
 @dataclass
@@ -18,6 +18,12 @@ class DatabaseConfig:
     idle_timeout: int = 30
 
     options: Dict[str, Any] = {}
+
+@dataclass
+class DatabaseConnection:
+
+    @staticmethod
+    def connect(config: DatabaseConfig): ...
 
 
 @dataclass

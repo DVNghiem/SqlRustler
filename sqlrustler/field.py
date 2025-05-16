@@ -61,7 +61,6 @@ class Field:
         }
         return type_mapping.get(self.field_type, "VARCHAR(255)")
 
-
 class CharField(Field):
     def __init__(self, max_length: int = 255, **kwargs):
         super().__init__(field_type="str", **kwargs)
