@@ -367,7 +367,6 @@ class QuerySet:
 
     def execute(self) -> List[Any]:
         sql, params = self.to_sql()
-        print(sql, params)
         with self.model.get_session(alias=self.alias) as tx:
             result = tx.fetch_all(sql, params)
         instances = [
