@@ -70,7 +70,7 @@ impl ResultMapper for PostgresMapper {
                             Ok(Some(val)) => Ok(val.to_object(py)),
                             Ok(None) => Ok(py.None()),
                             Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("Unsupported column type for {}", key)
+                                format!("Unsupported column type for {} {}", key, value)
                             )),
                         },
                     },

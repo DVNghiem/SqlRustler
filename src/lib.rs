@@ -17,8 +17,9 @@ fn sqlrustler(_py: Python, module: &PyModule) -> PyResult<()>  {
 
     module.add_class::<config::DatabaseType>()?;
     module.add_class::<config::DatabaseConfig>()?;
-    // module.add_class::<transaction::DatabaseTransaction>()?;
+    module.add_class::<transaction::TransactionWrapper>()?;
     module.add_class::<connection::DatabaseConnection>()?;
+    module.add_class::<session::Session>()?;
 
     pyo3::prepare_freethreaded_python();
     Ok(())

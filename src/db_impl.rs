@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use futures::TryStreamExt;
 use pyo3::{prelude::*, types::{PyDict, PyList}};
 use sqlx::{Postgres, MySql, Sqlite, Row, Column};
@@ -49,36 +50,53 @@ impl ParameterBinder for PostgresBinder {
 
 pub struct PostgresMapper;
 
+
 impl ResultMapper for PostgresMapper {
     type Row = sqlx::postgres::PgRow;
     type Database = Postgres;
 
     fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr> {
-        let dict = PyDict::new(py);
-        for (i, col) in row.columns().iter().enumerate() {
-            let key = col.name();
-            let value: PyObject = match row.try_get::<Option<i64>, _>(i) {
-                Ok(Some(val)) => Ok(val.to_object(py)),
-                Ok(None) => Ok(py.None()),
-                Err(_) => match row.try_get::<Option<f64>, _>(i) {
-                    Ok(Some(val)) => Ok(val.to_object(py)),
-                    Ok(None) => Ok(py.None()),
-                    Err(_) => match row.try_get::<Option<&str>, _>(i) {
-                        Ok(Some(val)) => Ok(val.to_object(py)),
-                        Ok(None) => Ok(py.None()),
-                        Err(_) => match row.try_get::<Option<bool>, _>(i) {
-                            Ok(Some(val)) => Ok(val.to_object(py)),
-                            Ok(None) => Ok(py.None()),
-                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("Unsupported column type for {}", key)
-                            )),
-                        },
-                    },
-                },
-            }?;
-            dict.set_item(key, value)?;
+        // Create a list of (name, value, type) tuples for each column
+        let columns = PyList::empty(py);
+        for col in row.columns().iter() {
+            let name = col.name();
+            let col_type = col.type_info().to_string();
+            let value: PyObject = match col_type.as_str() {
+                "INT8" | "BIGINT" => row.try_get::<Option<i64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "INT4" | "INTEGER" | "SERIAL" => row.try_get::<Option<i32>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => row.try_get::<Option<f64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TEXT" | "VARCHAR" | "CHAR" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "BOOL" | "BOOLEAN" => row.try_get::<Option<bool>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TIMESTAMP" => {
+                    row.try_get::<Option<NaiveDateTime>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S").to_string().to_object(py)))
+                }
+                "TIMESTAMPTZ" => {
+                    row.try_get::<Option<DateTime<Utc>>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S%Z").to_string().to_object(py)))
+                }
+                "DATE" => {
+                    row.try_get::<Option<NaiveDate>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%d").to_string().to_object(py)))
+                }
+                "UUID" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "JSON" | "JSONB" => {
+                    row.try_get::<Option<serde_json::Value>, _>(name)
+                        .map_or(py.None(), |v| serde_json::to_string(&v).unwrap().to_object(py))
+                }
+                "TEXT[]" | "VARCHAR[]" => {
+                    row.try_get::<Option<Vec<String>>, _>(name)
+                        .map_or(py.None(), |v| PyList::new(py, v.iter()).to_object(py))
+                }
+                _ => {
+                    // Fallback to String for unknown types
+                    row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py))
+                }
+            };
+            let col_tuple = (name, value, col_type).to_object(py);
+            columns.append(col_tuple)?;
         }
-        Ok(dict.to_object(py))
+        Ok(columns.to_object(py))
     }
 }
 
@@ -252,31 +270,40 @@ impl ResultMapper for MySqlMapper {
     type Database = MySql;
 
     fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr> {
-        let dict = PyDict::new(py);
-        for (i, col) in row.columns().iter().enumerate() {
-            let key = col.name();
-            let value: PyObject = match row.try_get::<Option<i64>, _>(i) {
-                Ok(Some(val)) => Ok(val.to_object(py)),
-                Ok(None) => Ok(py.None()),
-                Err(_) => match row.try_get::<Option<f64>, _>(i) {
-                    Ok(Some(val)) => Ok(val.to_object(py)),
-                    Ok(None) => Ok(py.None()),
-                    Err(_) => match row.try_get::<Option<&str>, _>(i) {
-                        Ok(Some(val)) => Ok(val.to_object(py)),
-                        Ok(None) => Ok(py.None()),
-                        Err(_) => match row.try_get::<Option<bool>, _>(i) {
-                            Ok(Some(val)) => Ok(val.to_object(py)),
-                            Ok(None) => Ok(py.None()),
-                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("Unsupported column type for {}", key)
-                            )),
-                        },
-                    },
-                },
-            }?;
-            dict.set_item(key, value)?;
+        // Create a list of (name, value, type) tuples for each column
+        let columns = PyList::empty(py);
+        for col in row.columns().iter() {
+            let name = col.name();
+            let col_type = col.type_info().to_string();
+            let value: PyObject = match col_type.as_str() {
+                "INT8" | "BIGINT" => row.try_get::<Option<i64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "INT4" | "INTEGER" | "SERIAL" => row.try_get::<Option<i32>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => row.try_get::<Option<f64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TEXT" | "VARCHAR" | "CHAR" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "BOOL" | "BOOLEAN" => row.try_get::<Option<bool>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TIMESTAMP" => {
+                    row.try_get::<Option<NaiveDateTime>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S").to_string().to_object(py)))
+                }
+                "TIMESTAMPTZ" => {
+                    row.try_get::<Option<DateTime<Utc>>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S%Z").to_string().to_object(py)))
+                }
+                "DATE" => {
+                    row.try_get::<Option<NaiveDate>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%d").to_string().to_object(py)))
+                }
+                "UUID" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+
+                _ => {
+                    // Fallback to String for unknown types
+                    row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py))
+                }
+            };
+            let col_tuple = (name, value, col_type).to_object(py);
+            columns.append(col_tuple)?;
         }
-        Ok(dict.to_object(py))
+        Ok(columns.to_object(py))
     }
 }
 

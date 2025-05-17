@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use sqlx::{Postgres, MySql, Sqlite};
 
+use crate::connection::get_runtime;
 use crate::db_operations::Database;
 use crate::db_trait::{DatabaseExecutor, DatabaseFetcher, DatabaseBulkUpdater};
 use crate::error::DatabaseError;
@@ -53,7 +54,7 @@ impl TransactionWrapper {
     pub fn execute(&self, query: &str, params: Vec<&PyAny>) -> PyResult<u64> {
         let db = Database::new();
         // Convert &PyAny to PyObject before entering allow_threads
-        let result = futures::executor::block_on(async move {
+        let result = get_runtime().block_on(async move {
            let tx_entry = SESSION_MAP
                     .remove(&self.session_id)
                     .ok_or(DatabaseError::TransactionNotFound)?;
@@ -78,7 +79,7 @@ impl TransactionWrapper {
 
     pub fn fetch_all(&self, query: &str, params: Vec<&PyAny>, py: Python) -> PyResult<Vec<PyObject>> {
         let db = Database::new();
-        let result = futures::executor::block_on(async move {
+        let result = get_runtime().block_on(async move {
             let tx_entry = SESSION_MAP
                     .remove(&self.session_id)
                     .ok_or(DatabaseError::TransactionNotFound)?;
@@ -108,7 +109,7 @@ impl TransactionWrapper {
         py: Python,
     ) -> PyResult<Vec<Vec<PyObject>>> {
         let db = Database::new();
-        let result = futures::executor::block_on(async move {
+        let result = get_runtime().block_on(async move {
            let tx_entry = SESSION_MAP
                     .remove(&self.session_id)
                     .ok_or(DatabaseError::TransactionNotFound)?;
@@ -144,7 +145,7 @@ impl TransactionWrapper {
     ) -> PyResult<u64> {
         let db = Database::new();
 
-        let result = futures::executor::block_on(async move {
+        let result = get_runtime().block_on(async move {
             let tx_entry = SESSION_MAP
                     .remove(&self.session_id)
                     .ok_or(DatabaseError::TransactionNotFound)?;

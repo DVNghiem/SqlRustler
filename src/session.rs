@@ -6,7 +6,6 @@ use lazy_static::lazy_static;
 use crate::{
     connection::{get_connection, get_runtime},
     transaction::{Transaction, TransactionWrapper},
-    error::DatabaseError,
 };
 
 lazy_static! {
