@@ -51,11 +51,17 @@ class F:
             return Expression(f"LEAD({self.field}, {offset})", [])
         return Expression(f"LEAD({self.field}, {offset}, %s)", [default])
 
-    def row_number(self):
-        return Expression("ROW_NUMBER()", [])
+    def row_number(self, window_alias: str = None):
+        if window_alias:
+            return Expression(f"ROW_NUMBER() OVER {window_alias}", [])
+        return Expression("ROW_NUMBER() OVER ()", [])
 
-    def rank(self):
-        return Expression("RANK()", [])
+    def rank(self, window_alias: str = None):
+        if window_alias:
+            return Expression(f"RANK() OVER {window_alias}", [])
+        return Expression("RANK() OVER ()", [])
 
-    def dense_rank(self):
-        return Expression("DENSE_RANK()", [])
+    def dense_rank(self, window_alias: str = None):
+        if window_alias:
+            return Expression(f"DENSE_RANK() OVER {window_alias}", [])
+        return Expression("DENSE_RANK() OVER ()", [])
