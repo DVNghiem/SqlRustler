@@ -620,7 +620,6 @@ class QuerySet:
             if field_name in row_dict:
                 value, col_type = row_dict[field_name]
                 parsed_data[field_name] = self._convert_value(value, col_type, field.field_type)
-        print(parsed_data)
         return self.model(**parsed_data)
     
     def _infer_aggregate_type(self, expr: Expression, field_name: str) -> str:
@@ -641,7 +640,7 @@ class QuerySet:
         """Parse raw aggregate row using type inference."""
         parsed = {}
         # Convert list of tuples to dict
-        row_dict = {col_name: (value, col_type) for col_name, col_name, value, col_type in row}
+        row_dict = {col_name: (value, col_type) for col_name, value, col_type in row}
         
         for alias, expr in annotations.items():
             if alias in row_dict:
