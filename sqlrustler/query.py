@@ -1,6 +1,9 @@
 from enum import Enum
 from typing import Any, Dict, List, Tuple, Union, Optional
 from abc import ABC, abstractmethod
+import decimal
+import datetime
+import json
 
 from .field import ForeignKeyField
 from .sqlrustler import get_db_type_with_alias, DatabaseType
@@ -576,9 +579,82 @@ class QuerySet:
             qs.query_parts["where"].append(sql)
             qs.params.extend(params)
         return qs
+    
+    def _convert_value(self, value: Any, type_str: str, field_type: Optional[str] = None) -> Any:
+        """Convert a value to the appropriate Python type based on type string and optional field type."""
+        if value is None:
+            return None
+        
+        try:
+            if type_str == "int" or field_type == "int":
+                return int(value)
+            elif type_str == "str" or field_type == "str":
+                return str(value)
+            elif type_str == "decimal" or field_type == "decimal":
+                return decimal.Decimal(str(value))
+            elif type_str == "datetime" or field_type == "datetime":
+                if isinstance(value, str):
+                    return datetime.datetime.fromisoformat(value)
+                return value  # Assume datetime object
+            elif type_str == "json" or field_type == "json":
+                if isinstance(value, str):
+                    return json.loads(value)
+                return value  # Assume dict/list
+            elif type_str == "array" or field_type == "array":
+                if isinstance(value, list):
+                    return value
+                return list(value) if value else []
+            else:
+                return value  # Fallback to raw value
+        except (ValueError, TypeError, json.JSONDecodeError) as e:
+            print(f"Warning: Failed to convert value {value} of type {type_str}: {e}")
+            return value
+    
+    def _parse_row(self, row: List[Tuple[str, Any, str]]) -> Any:
+        """Parse a single row from Rust into a model instance."""
+        parsed_data = {}
+        # Convert list of tuples to dict
+        row_dict = {col_name: (value, col_type) for col_name, value, col_type in row}
+        
+        for field_name, field in self.model._fields.items():
+            if field_name in row_dict:
+                value, col_type = row_dict[field_name]
+                parsed_data[field_name] = self._convert_value(value, col_type, field.field_type)
+        print(parsed_data)
+        return self.model(**parsed_data)
+    
+    def _infer_aggregate_type(self, expr: Expression, field_name: str) -> str:
+        """Infer the result type of an aggregation expression."""
+        if "SUM(" in expr.sql or "AVG(" in expr.sql:
+            if field_name in self.model._fields:
+                return self.model._fields[field_name].field_type
+            return "decimal"
+        elif "COUNT(" in expr.sql:
+            return "int"
+        elif "MAX(" in expr.sql or "MIN(" in expr.sql:
+            if field_name in self.model._fields:
+                return self.model._fields[field_name].field_type
+            return "str"
+        return "str"
+    
+    def _parse_aggregate_row(self, row: List[Tuple[str, Any, str]], annotations: Dict[str, Expression]) -> Dict[str, Any]:
+        """Parse raw aggregate row using type inference."""
+        parsed = {}
+        # Convert list of tuples to dict
+        row_dict = {col_name: (value, col_type) for col_name, col_name, value, col_type in row}
+        
+        for alias, expr in annotations.items():
+            if alias in row_dict:
+                # Extract field name from expr.sql (e.g., SUM(res_partner.partner_latitude) -> partner_latitude)
+                field_name = expr.sql.split("(")[-1].split(")")[0].split(".")[-1] if "(" in expr.sql else alias
+                field_type = self._infer_aggregate_type(expr, field_name)
+                value, col_type = row_dict[alias]
+                parsed[alias] = self._convert_value(value, col_type, field_type)
+        
+        return parsed
 
-    def get(self, *args, **kwargs) -> Dict[str, Any]:
-        """Fetch exactly one record matching the conditions."""
+    def get(self, *args, **kwargs) -> Any:
+        """Fetch exactly one model instance matching the conditions."""
         qs = self.filter(*args, **kwargs)
         sql, params = qs.to_sql()
         session = self.model.get_session(alias=self.alias)
@@ -591,7 +667,7 @@ class QuerySet:
             raise MultipleObjectsReturned(
                 f"get() returned {len(result)} objects, expected exactly one."
             )
-        return result[0]
+        return self._parse_row(result[0])
 
     def first(self) -> Optional[Dict[str, Any]]:
         """Return the first record or None."""
@@ -667,15 +743,25 @@ class QuerySet:
         return qs
 
     def aggregate(self, **annotations) -> Dict[str, Any]:
-        """Compute aggregate values (e.g., SUM, COUNT)."""
+        """Compute aggregate values (e.g., SUM, COUNT) and return raw results."""
+        if not annotations:
+            return {}
+
         qs = self.clone()
         qs = qs.annotate(**annotations)
         qs.query_parts["select"] = [
             f"{expr.sql} AS {alias}" for alias, expr in annotations.items()
             if isinstance(expr, Expression)
         ]
-        result = qs.execute()
-        return result[0] if result else {}
+        sql, params = qs.to_sql()
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.fetch_all(sql, params)
+        
+        if not result:
+            return {}
+        
+        return self._parse_aggregate_row(result[0], annotations)
 
     def where(self, *args, **kwargs) -> "QuerySet":
         qs = self.clone()
@@ -1004,13 +1090,13 @@ class QuerySet:
         sql, params = self.to_sql()
         session = self.model.get_session(alias=self.alias)
         with session as tx:
-            print(sql, params)
             result = tx.fetch_all(sql, params)
-        
+        # Parse rows into model instances
+        instances = [self._parse_row(row) for row in result]
         if self._prefetch_related:
-            result = self._handle_prefetch_related(result)
+            instances = self._handle_prefetch_related(instances, result)
         
-        return result
+        return instances
 
     def _handle_prefetch_related(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Fetch related objects for prefetch_related lookups."""

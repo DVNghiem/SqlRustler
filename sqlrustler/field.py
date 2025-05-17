@@ -97,7 +97,8 @@ class Field:
         index: bool = False,
         validators: Optional[list] = None,
         auto_increment: bool = False,
-        database_type: str = "postgres",  # Default to postgres
+        base_field: Optional["Field"] = None,
+        to_model: Optional[Any] = None,  # Related model for foreign keys
     ):
         self.field_type = field_type
         self.primary_key = primary_key
@@ -109,15 +110,9 @@ class Field:
         self.name = None
         self.model = None
         self.auto_increment = auto_increment
-        self.database_type = database_type
-        self.type_mapper = self._get_type_mapper()
-
-    def _get_type_mapper(self) -> TypeMapper:
-        mappers = {
-            "postgres": PostgresTypeMapper(),
-            "mysql": MySqlTypeMapper(),
-        }
-        return mappers.get(self.database_type.lower(), PostgresTypeMapper())
+        self.base_field = base_field
+        self.to_model = to_model
+        self.name: Optional[str] = None
 
     def validate(self, value: Any) -> None:
         """Template method for validation."""
@@ -143,6 +138,36 @@ class Field:
 
     def sql_type(self) -> str:
         return self.type_mapper.get_sql_type(self.field_type)
+    
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        # Check if related instance is cached
+        if self.to_model and self.name in instance._related_data:
+            return instance._related_data[self.name]
+        # Return raw foreign key value if no related data
+        value = instance._data.get(self.name)
+        if self.to_model and value is not None:
+            # Dynamically fetch related instance if not preloaded
+            try:
+                related_instance = self.to_model.objects(instance.__alias__).get(id=value)
+                instance._related_data[self.name] = related_instance
+                return related_instance
+            except self.to_model.DoesNotExist:
+                instance._related_data[self.name] = None
+                return None
+        return value
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        if self.name not in instance._data:
+            raise AttributeError(f"Cannot set undeclared field {self.name}")
+        if self.to_model and isinstance(value, self.to_model):
+            instance._data[self.name] = value._data.get("id")
+            instance._related_data[self.name] = value
+        else:
+            instance._data[self.name] = value
+            if self.name in instance._related_data:
+                del instance._related_data[self.name]
 
 
 class CharField(Field):
@@ -303,7 +328,7 @@ class ForeignKeyField(Field):
             related_field_obj = getattr(to_model, related_field, None)
             if related_field_obj is None:
                 raise ValueError(
-                    f"Field {related_field} not found in model {to_model.__name__}"
+                    f"Field {related_field} not found in model {to_model.table_name()}"
                 )
             field_type = related_field_obj.field_type
 

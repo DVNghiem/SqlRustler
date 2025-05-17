@@ -1,11 +1,10 @@
 import re
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, Any
 
 from .field import Field, ForeignKeyField
 from .query import QuerySet
 from .sqlrustler import Session
-
 
 
 def to_snake_case(name: str) -> str:
@@ -47,13 +46,15 @@ class Model(metaclass=MetaModel):
         """Get a session for query execution."""
         return Session(alias=alias or cls._alias)
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any):
+        """Initialize model instance with field values."""
         self._data = {}
-        for name, field in self._fields.items():
-            if field.default is not None:
-                self._data[name] = field.default
-            if name in kwargs:
-                self._data[name] = kwargs[name]
+        self._related_data = {}  # Store related model instances
+        for field_name, value in kwargs.items():
+            if field_name in self._fields:
+                self._data[field_name] = value
+            else:
+                raise ValueError(f"Unknown field {field_name} for {self.__class__.__name__}")
 
     @classmethod
     def objects(cls, alias: Optional[str] = None) -> QuerySet:
