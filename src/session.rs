@@ -15,14 +15,16 @@ lazy_static! {
 #[pyclass]
 pub struct Session {
     context_id: String,
+    alias: String,
 }
 
 #[pymethods]
 impl Session {
     #[new]
-    pub fn new(context_id: Option<String>) -> Self {
+    pub fn new(context_id: Option<String>, alias: Option<String>) -> Self {
         let context_id = context_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        Session { context_id }
+        let alias = alias.unwrap_or_else(|| "default".to_string());
+        Session { context_id, alias }
     }
 
     #[getter]
@@ -31,7 +33,7 @@ impl Session {
     }
 
     pub fn __enter__(&self, py: Python) -> PyResult<TransactionWrapper> {
-        let connection = get_connection()?;
+        let connection = get_connection(&self.alias)?;
         let tx = py.allow_threads(|| {
             get_runtime().block_on(async { connection.begin_transaction().await })
         })?;

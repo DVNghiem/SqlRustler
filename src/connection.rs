@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use pyo3::prelude::*;
 use once_cell::sync::OnceCell;
 use tokio::runtime::Runtime;
@@ -10,7 +11,7 @@ use crate::{
 };
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
-static CONNECTION: OnceCell<Arc<Connection>> = OnceCell::new();
+static CONNECTION: OnceCell<DashMap<String, Arc<Connection>>> = OnceCell::new();
 
 pub fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().unwrap())
@@ -44,30 +45,37 @@ impl Connection {
         }
     }
 }
-
-pub fn get_connection() -> Result<&'static Arc<Connection>, DatabaseError> {
+pub fn get_connection(alias: &str) -> Result<Arc<Connection>, DatabaseError> {
     CONNECTION
         .get()
         .ok_or(DatabaseError::NotConnected)
+        .and_then(|conn_map| {
+            conn_map.get(alias)
+                .map(|c| Arc::clone(&c))
+                .ok_or(DatabaseError::NotConnected)
+        })
 }
 
-pub fn set_connection(connection: Connection) -> Result<(), DatabaseError> {
-    CONNECTION
-        .set(Arc::new(connection))
-        .map_err(|_| DatabaseError::Configuration("Connection already set".into()))
+pub fn set_connection(connection: Connection, alias: String) -> Result<(), DatabaseError> {
+    let conn_map = CONNECTION.get_or_init(|| DashMap::new());
+    if conn_map.contains_key(&alias) {
+        return Err(DatabaseError::Configuration("Connection already set".into()));
+    }
+    conn_map.insert(alias, Arc::new(connection));
+    Ok(())
 }
-
 #[pyclass]
 pub struct DatabaseConnection;
 
 #[pymethods]
 impl DatabaseConnection {
     #[staticmethod]
-    pub fn connect(config: DatabaseConfig, py: Python) -> PyResult<()> {
+    pub fn connect(config: DatabaseConfig, alias: Option<String>, py: Python) -> PyResult<()> {
+        let alias = alias.unwrap_or_else(|| "default".to_string());
         let connection = py.allow_threads(|| {
             get_runtime().block_on(async { Connection::new(config).await })
         })?;
-        set_connection(connection)?;
+        set_connection(connection, alias)?;
         Ok(())
     }
 }
