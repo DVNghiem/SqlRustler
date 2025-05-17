@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .express import Expression
 from .field import ForeignKeyField
 
+# Configure logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,12 @@ class ResultParser:
             | {f for f in self.queryset.model._fields}
             | self.queryset.state["annotations"]
             | {
-                f"{rel.to_model.table_name()}__{f}"
-                for rel in self.queryset._selected_related
-                for f in rel.to_model._fields
+                f"{self.queryset.model._fields[field_name].to_model.table_name()}__{f}"
+                for field_name in self.queryset._selected_related
+                if isinstance(
+                    self.queryset.model._fields.get(field_name), ForeignKeyField
+                )
+                for f in self.queryset.model._fields[field_name].to_model._fields
             }
         )
         for col_name in row_dict:
