@@ -1,7 +1,19 @@
 from enum import Enum
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
+from abc import ABC, abstractmethod
 
 from .field import ForeignKeyField
+from .sqlrustler import get_db_type_with_alias, DatabaseType
+
+
+class DoesNotExist(Exception):
+    """Raised when a query returns no results when exactly one is expected."""
+    pass
+
+
+class MultipleObjectsReturned(Exception):
+    """Raised when a query returns multiple results when exactly one is expected."""
+    pass
 
 
 class JoinType(Enum):
@@ -30,22 +42,94 @@ class Operator(Enum):
     IREGEXP = "~*"
 
 
-class Expression:
-    """Class for representing SQL expressions with parameters"""
+class DatabaseAdapter(ABC):
+    """Adapter for database-specific SQL generation and operator support."""
+    
+    @abstractmethod
+    def get_placeholder(self, counter: int) -> str:
+        pass
 
+    @abstractmethod
+    def supports_operator(self, op: str) -> bool:
+        pass
+
+    @abstractmethod
+    def format_operator(self, op: str) -> str:
+        pass
+
+
+class PostgresAdapter(DatabaseAdapter):
+    def get_placeholder(self, counter: int) -> str:
+        return f"${counter}"
+
+    def supports_operator(self, op: str) -> bool:
+        return op in {e.value for e in Operator}
+
+    def format_operator(self, op: str) -> str:
+        return op
+
+
+class MySqlAdapter(DatabaseAdapter):
+    def get_placeholder(self, counter: int) -> str:
+        return "?"
+
+    def supports_operator(self, op: str) -> bool:
+        unsupported = {"ILIKE", "~", "~*"}
+        return op not in unsupported
+
+    def format_operator(self, op: str) -> str:
+        if op == "ILIKE":
+            return "LIKE"
+        return op
+
+
+class QueryBuilder(ABC):
+    """Builder for generating database-specific SQL queries."""
+    
+    def __init__(self, queryset: 'QuerySet'):
+        self.queryset = queryset
+        self.adapter = self._get_adapter()
+
+    @abstractmethod
+    def _get_adapter(self) -> DatabaseAdapter:
+        pass
+
+    def build_sql(self) -> Tuple[str, List]:
+        parts = []
+        self._build_sql_parts(parts)
+        return " ".join(parts), self.queryset.params
+
+    def _build_sql_parts(self, parts: List[str]):
+        self.queryset._add_with_clause(parts)
+        self.queryset._add_select_clause(parts)
+        self.queryset._add_from_clause(parts)
+        self.queryset._add_joins_clause(parts)
+        self.queryset._add_where_clause(parts)
+        self.queryset._add_group_by_clause(parts)
+        self.queryset._add_having_clause(parts)
+        self.queryset._add_window_clause(parts)
+        self.queryset._add_order_by_clause(parts)
+        self.queryset._add_limit_clause(parts)
+        self.queryset._add_offset_clause(parts)
+        self.queryset._add_locking_clauses(parts)
+
+
+class PostgresQueryBuilder(QueryBuilder):
+    def _get_adapter(self) -> DatabaseAdapter:
+        return PostgresAdapter()
+
+
+class MySqlQueryBuilder(QueryBuilder):
+    def _get_adapter(self) -> DatabaseAdapter:
+        return MySqlAdapter()
+
+
+class Expression:
     def __init__(self, sql: str, params: list):
         self.sql = sql
         self.params = params
 
-    def over(
-        self, partition_by=None, order_by=None, frame=None, window_name=None
-    ):  # NOSONAR
-        """
-        Add OVER clause for window functions with support for:
-        - Named windows
-        - Custom frame definitions
-        - Flexible partitioning and ordering
-        """
+    def over(self, partition_by=None, order_by=None, frame=None, window_name=None):
         if window_name:
             self.sql = f"{self.sql} OVER {window_name}"
             return self
@@ -56,18 +140,12 @@ class Expression:
         if partition_by:
             if isinstance(partition_by, str):
                 partition_by = [partition_by]
-            # Handle both raw SQL and Django-style field references
-            formatted_fields = []
-            for field in partition_by:
-                if "__" in field:  # Django-style field reference
-                    field = field.replace("__", ".")
-                formatted_fields.append(field)
+            formatted_fields = [f.replace("__", ".") for f in partition_by]
             clauses.append(f"PARTITION BY {', '.join(formatted_fields)}")
 
         if order_by:
             if isinstance(order_by, str):
                 order_by = [order_by]
-            # Handle both raw SQL and Django-style ordering
             formatted_order = []
             for field in order_by:
                 if isinstance(field, str):
@@ -75,7 +153,7 @@ class Expression:
                         field = f"{field[1:]} DESC"
                     elif field.startswith("+"):
                         field = f"{field[1:]} ASC"
-                    if "__" in field:  # Django-style field reference
+                    if "__" in field:
                         field = field.replace("__", ".")
                 formatted_order.append(field)
             clauses.append(f"ORDER BY {', '.join(formatted_order)}")
@@ -84,7 +162,7 @@ class Expression:
             if isinstance(frame, str):
                 clauses.append(frame)
             elif isinstance(frame, (list, tuple)):
-                frame_type = "ROWS"  # Default frame type
+                frame_type = "ROWS"
                 if len(frame) == 3 and frame[0].upper() in ("ROWS", "RANGE", "GROUPS"):
                     frame_type = frame[0].upper()
                     frame = frame[1:]
@@ -93,14 +171,11 @@ class Expression:
 
         parts.append(" ".join(clauses))
         parts.append(")")
-
         self.sql = f"{self.sql} {' '.join(parts)}"
         return self
 
 
 class F:
-    """Class for creating SQL expressions and column references"""
-
     def __init__(self, field: str):
         self.field = field.replace("__", ".")
 
@@ -124,63 +199,49 @@ class F:
             return Expression(f"{self.field} / {other.field}", [])
         return Expression(f"{self.field} / ?", [other])
 
-    # Window function methods
     def sum(self):
-        """SUM window function"""
         return Expression(f"SUM({self.field})", [])
 
     def avg(self):
-        """AVG window function"""
         return Expression(f"AVG({self.field})", [])
 
     def count(self):
-        """COUNT window function"""
         return Expression(f"COUNT({self.field})", [])
 
     def max(self):
-        """MAX window function"""
         return Expression(f"MAX({self.field})", [])
 
     def min(self):
-        """MIN window function"""
         return Expression(f"MIN({self.field})", [])
 
     def lag(self, offset=1, default=None):
-        """LAG window function"""
         if default is None:
             return Expression(f"LAG({self.field}, {offset})", [])
         return Expression(f"LAG({self.field}, {offset}, ?)", [default])
 
     def lead(self, offset=1, default=None):
-        """LEAD window function"""
         if default is None:
             return Expression(f"LEAD({self.field}, {offset})", [])
         return Expression(f"LEAD({self.field}, {offset}, ?)", [default])
 
     def row_number(self):
-        """ROW_NUMBER window function"""
         return Expression("ROW_NUMBER()", [])
 
     def rank(self):
-        """RANK window function"""
         return Expression("RANK()", [])
 
     def dense_rank(self):
-        """DENSE_RANK window function"""
         return Expression("DENSE_RANK()", [])
 
 
 class Window:
-    """Class for defining named windows"""
-
     def __init__(self, name: str, partition_by=None, order_by=None, frame=None):
         self.name = name
         self.partition_by = partition_by
         self.order_by = order_by
         self.frame = frame
 
-    def to_sql(self):  # NOSONAR
-        """Convert window definition to SQL"""
+    def to_sql(self):
         parts = [f"{self.name} AS ("]
         clauses = []
 
@@ -204,22 +265,16 @@ class Window:
                 formatted_order.append(field)
             clauses.append(f"ORDER BY {', '.join(formatted_order)}")
 
-        if self.frame:
-            if isinstance(self.frame, str):
-                clauses.append(self.frame)
-            elif isinstance(self.frame, (list, tuple)):
-                frame_type = "ROWS"
-                if len(self.frame) == 3 and self.frame[0].upper() in (
-                    "ROWS",
-                    "RANGE",
-                    "GROUPS",
-                ):
-                    frame_type = self.frame[0].upper()
-                    self.frame = self.frame[1:]
-                frame_clause = (
-                    f"{frame_type} BETWEEN {self.frame[0]} AND {self.frame[1]}"
-                )
-                clauses.append(frame_clause)
+        # if frame:
+        #     if isinstance(frame, str):
+        #         clauses.append(frame)
+        #     elif isinstance(frame, (list, tuple)):
+        #         frame_type = "ROWS"
+        #         if len(frame) == 3 and frame[0].upper() in ("ROWS", "RANGE", "GROUPS"):
+        #             frame_type = frame[0].upper()
+        #             frame = frame[1:]
+        #         frame_clause = f"{frame_type} BETWEEN {frame[0]} AND {frame[1]}"
+        #         clauses.append(frame_clause)
 
         parts.append(" ".join(clauses))
         parts.append(")")
@@ -227,23 +282,18 @@ class Window:
 
 
 class Q:
-    """Class for complex WHERE conditions with AND/OR operations"""
-
     def __init__(self, *args, **kwargs):
         self.children = list(args)
         self.connector = "AND"
         self.negated = False
 
         if kwargs:
-            # Convert kwargs to Q objects and add them
             for key, value in kwargs.items():
                 condition = {key: value}
                 self.children.append(condition)
 
     def __and__(self, other):
         if getattr(other, "connector", "AND") == "AND" and not other.negated:
-            # If other is also an AND condition and not negated,
-            # we can merge their children
             clone = self._clone()
             clone.children.extend(other.children)
             return clone
@@ -255,8 +305,6 @@ class Q:
 
     def __or__(self, other):
         if getattr(other, "connector", "OR") == "OR" and not other.negated:
-            # If other is also an OR condition and not negated,
-            # we can merge their children
             clone = self._clone()
             clone.connector = "OR"
             clone.children.extend(other.children)
@@ -273,7 +321,6 @@ class Q:
         return clone
 
     def _clone(self):
-        """Create a copy of the current Q object"""
         clone = Q()
         clone.connector = self.connector
         clone.negated = self.negated
@@ -281,16 +328,12 @@ class Q:
         return clone
 
     def add(self, child, connector):
-        """Add a child node, updating connector if necessary"""
         if connector != self.connector:
-            # If connectors don't match, we need to nest the existing children
             self.children = [Q(*self.children, connector=self.connector)]
             self.connector = connector
 
         if isinstance(child, Q):
             if child.connector == connector and not child.negated:
-                # If child has same connector and is not negated,
-                # we can merge its children directly
                 self.children.extend(child.children)
             else:
                 self.children.append(child)
@@ -298,10 +341,6 @@ class Q:
             self.children.append(child)
 
     def _combine(self, other, connector):
-        """
-        Combine this Q object with another one using the given connector.
-        This is an internal method used by __and__ and __or__.
-        """
         if not other:
             return self._clone()
 
@@ -314,20 +353,14 @@ class Q:
         return q
 
     def __bool__(self):
-        """Return True if this Q object has any children"""
         return bool(self.children)
 
     def __str__(self):
-        """
-        Return a string representation of the Q object,
-        useful for debugging
-        """
         if self.negated:
             return f"NOT ({self._str_inner()})"
         return self._str_inner()
 
     def _str_inner(self):
-        """Helper method for __str__"""
         if not self.children:
             return ""
 
@@ -336,9 +369,7 @@ class Q:
             if isinstance(child, Q):
                 child_str = str(child)
             elif isinstance(child, dict):
-                child_str = " AND ".join(
-                    f"{k}={v}" for k, v in child.items()
-                )  # NOSONAR
+                child_str = " AND ".join(f"{k}={v}" for k, v in child.items())
             else:
                 child_str = str(child)
             children_str.append(f"({child_str})")
@@ -347,8 +378,9 @@ class Q:
 
 
 class QuerySet:
-    def __init__(self, model):
+    def __init__(self, model, alias: str = "default"):
         self.model = model
+        self.alias = alias
         self.query_parts = {
             "select": ["*"],
             "where": [],
@@ -363,44 +395,65 @@ class QuerySet:
         }
         self.params = []
         self._distinct = False
+        self._distinct_on = []
         self._for_update = False
         self._for_share = False
         self._nowait = False
         self._skip_locked = False
+        self._for_update_of = []
+        self._no_key = False
         self._param_counter = 1
         self._selected_related = set()
+        self._prefetch_related = set()
+        self._builder = self._get_builder()
+
+    def _get_db_type(self) -> DatabaseType:
+        """Get database type from alias mapping."""
+        return get_db_type_with_alias(self.alias)
+
+    def _get_builder(self) -> QueryBuilder:
+        db_type = self._get_db_type()
+        match db_type:
+            case DatabaseType.Postgres:
+                return PostgresQueryBuilder(self)
+            case DatabaseType.MySql:
+                return MySqlQueryBuilder(self)
+            case _:
+                raise ValueError(f"Unsupported database type: {db_type}")
 
     def __get_next_param(self):
-        param_name = f"${self._param_counter}"
+        placeholder = self._builder.adapter.get_placeholder(self._param_counter)
         self._param_counter += 1
-        return param_name
+        return placeholder
 
     def clone(self) -> "QuerySet":
-        new_qs = QuerySet(self.model)
+        new_qs = QuerySet(self.model, self.alias)
         new_qs.query_parts = {
             k: v[:] if isinstance(v, list) else v for k, v in self.query_parts.items()
         }
         new_qs.params = self.params[:]
         new_qs._distinct = self._distinct
+        new_qs._distinct_on = self._distinct_on[:]
         new_qs._for_update = self._for_update
         new_qs._for_share = self._for_share
         new_qs._nowait = self._nowait
         new_qs._skip_locked = self._skip_locked
+        new_qs._for_update_of = self._for_update_of[:]
+        new_qs._no_key = self._no_key
         new_qs._param_counter = self._param_counter
         new_qs._selected_related = self._selected_related.copy()
+        new_qs._prefetch_related = self._prefetch_related.copy()
         return new_qs
 
     def select(self, *fields, distinct: bool = False) -> "QuerySet":
         qs = self.clone()
         qs.query_parts["select"] = list(
-            map(lambda x: f"{qs.model.Meta.table_name}.{x}" if x != "*" else x, fields)
+            map(lambda x: f"{self.model.table_name()}.{x}" if x != "*" else x, fields)
         )
         qs._distinct = distinct
         return qs
 
-    def _process_q_object(
-        self, q_obj: Q, params: List | None = None
-    ) -> Tuple[str, List]:
+    def _process_q_object(self, q_obj: Q, params: List | None = None) -> Tuple[str, List]:
         if params is None:
             params = []
 
@@ -439,23 +492,19 @@ class QuerySet:
 
         if isinstance(value, F):
             return self._process_f_value(field, op, value)
-
         if isinstance(value, Expression):
             return self._process_expression_value(field, op, value)
-
         return self._process_standard_value(field, op, value)
 
     def _process_f_value(self, field: str, op: str, value: F) -> Tuple[str, List]:
-        return f"{self.model.Meta.table_name}.{field} {op} {value.field}", []
+        formatted_op = self._builder.adapter.format_operator(op)
+        return f"{self.model.table_name()}.{field} {formatted_op} {value.field}", []
 
-    def _process_expression_value(
-        self, field: str, op: str, value: Expression
-    ) -> Tuple[str, List]:
-        return f"{self.model.Meta.table_name}.{field} {op} {value.sql}", value.params
+    def _process_expression_value(self, field: str, op: str, value: Expression) -> Tuple[str, List]:
+        formatted_op = self._builder.adapter.format_operator(op)
+        return f"{self.model.table_name()}.{field} {formatted_op} {value.sql}", value.params
 
-    def _process_standard_value(
-        self, field: str, op: str, value: Any
-    ) -> Tuple[str, List]:
+    def _process_standard_value(self, field: str, op: str, value: Any) -> Tuple[str, List]:
         op_map = {
             "gt": Operator.GT.value,
             "lt": Operator.LT.value,
@@ -473,43 +522,163 @@ class QuerySet:
             "iregex": Operator.IREGEXP.value,
         }
 
+        formatted_op = self._builder.adapter.format_operator(op_map.get(op, op))
+        if not self._builder.adapter.supports_operator(formatted_op):
+            raise ValueError(f"Operator {op} not supported for alias {self.alias}")
+
         if op in op_map:
             return self._process_op_map_value(field, op, value, op_map)
         else:
             param_name = self.__get_next_param()
-            return f"{self.model.Meta.table_name}.{field} = {param_name}", [value]
+            return f"{self.model.table_name()}.{field} = {param_name}", [value]
 
-    def _process_op_map_value(
-        self, field: str, op: str, value: Any, op_map: dict
-    ) -> Tuple[str, List]:
-        param_name = self.__get_next_param()
-        combine_field_name = f"{self.model.Meta.table_name}.{field}"
+    def _process_op_map_value(self, field: str, op: str, value: Any, op_map: dict) -> Tuple[str, List]:
+        combine_field_name = f"{self.model.table_name()}.{field}"
+        formatted_op = self._builder.adapter.format_operator(op_map[op])
+
         if op in ("contains", "icontains"):
-            return f"{combine_field_name} {op_map[op]} {param_name}", [f"%{value}%"]
+            param_name = self.__get_next_param()
+            return f"{combine_field_name} {formatted_op} {param_name}", [f"%{value}%"]
         elif op == "startswith":
-            return f"{combine_field_name} {op_map[op]} {param_name}", [f"{value}%"]
+            param_name = self.__get_next_param()
+            return f"{combine_field_name} {formatted_op} {param_name}", [f"{value}%"]
         elif op == "endswith":
-            return f"{combine_field_name} {op_map[op]} {param_name}", [f"%{value}"]
+            param_name = self.__get_next_param()
+            return f"{combine_field_name} {formatted_op} {param_name}", [f"%{value}"]
         elif op == "isnull":
             return (
                 f"{combine_field_name} {Operator.IS_NULL.value if value else Operator.IS_NOT_NULL.value}",
                 [],
             )
         elif op == "between":
-            return f"{combine_field_name} {op_map[op]} {param_name} AND {param_name}", [
-                value[0],
-                value[1],
-            ]
+            param1 = self.__get_next_param()
+            param2 = self.__get_next_param()
+            return f"{combine_field_name} {formatted_op} {param1} AND {param2}", [value[0], value[1]]
         elif op in ("in", "not_in"):
-            placeholders = ",".join(["{param_name}" for _ in value])
-            return f"{combine_field_name} {op_map[op]} ({placeholders})", list(value)
+            placeholders = ",".join([self.__get_next_param() for _ in value])
+            self._param_counter += len(value)
+            return f"{combine_field_name} {formatted_op} ({placeholders})", list(value)
         else:
-            return f"{combine_field_name} {op_map[op]} {param_name}", [value]
+            param_name = self.__get_next_param()
+            return f"{combine_field_name} {formatted_op} {param_name}", [value]
+
+    def filter(self, *args, **kwargs) -> "QuerySet":
+        """Filter records based on conditions, alias for where."""
+        return self.where(*args, **kwargs)
+
+    def exclude(self, *args, **kwargs) -> "QuerySet":
+        """Exclude records matching the given conditions."""
+        qs = self.clone()
+        q = Q(*args, **kwargs)
+        q = ~q  # Negate the Q object
+        sql, params = qs._process_q_object(q)
+        if sql:
+            qs.query_parts["where"].append(sql)
+            qs.params.extend(params)
+        return qs
+
+    def get(self, *args, **kwargs) -> Dict[str, Any]:
+        """Fetch exactly one record matching the conditions."""
+        qs = self.filter(*args, **kwargs)
+        sql, params = qs.to_sql()
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.fetch_all(sql, params)
+        
+        if not result:
+            raise DoesNotExist(f"{self.model.__name__} matching query does not exist.")
+        if len(result) > 1:
+            raise MultipleObjectsReturned(
+                f"get() returned {len(result)} objects, expected exactly one."
+            )
+        return result[0]
+
+    def first(self) -> Optional[Dict[str, Any]]:
+        """Return the first record or None."""
+        qs = self.clone()
+        if not qs.query_parts["order_by"]:
+            qs = qs.order_by("id")  # Default ordering
+        qs = qs.limit(1)
+        result = qs.execute()
+        return result[0] if result else None
+
+    def last(self) -> Optional[Dict[str, Any]]:
+        """Return the last record or None."""
+        qs = self.clone()
+        if not qs.query_parts["order_by"]:
+            qs = qs.order_by("-id")  # Default reverse ordering
+        else:
+            # Reverse existing order_by
+            qs.query_parts["order_by"] = [
+                f"-{field}" if not field.startswith("-") else field[1:]
+                for field in qs.query_parts["order_by"]
+            ]
+        qs = qs.limit(1)
+        result = qs.execute()
+        return result[0] if result else None
+
+    def none(self) -> "QuerySet":
+        """Return an empty QuerySet."""
+        qs = self.clone()
+        qs.query_parts["where"] = ["1=0"]  # Always false condition
+        qs.params = []
+        return qs
+
+    def all(self) -> "QuerySet":
+        """Return all records (clone of current QuerySet)."""
+        return self.clone()
+
+    def distinct(self, *fields) -> "QuerySet":
+        """Remove duplicate rows, optionally on specific fields (PostgreSQL only)."""
+        qs = self.clone()
+        if fields:
+            if self._get_db_type() != "postgresql":
+                raise ValueError("DISTINCT ON fields is only supported in PostgreSQL")
+            qs._distinct_on = list(fields)
+            qs._distinct = True
+        else:
+            qs._distinct = True
+        return qs
+
+    def select_for_update(
+        self,
+        nowait: bool = False,
+        skip_locked: bool = False,
+        of: Optional[List[str]] = None,
+        no_key: bool = False
+    ) -> "QuerySet":
+        """Lock selected rows until transaction ends."""
+        qs = self.clone()
+        qs._for_update = True
+        qs._nowait = nowait
+        qs._skip_locked = skip_locked
+        qs._for_update_of = of or []
+        qs._no_key = no_key
+        return qs
+
+    def prefetch_related(self, *lookups) -> "QuerySet":
+        """Specify related objects to prefetch in separate queries."""
+        qs = self.clone()
+        for lookup in lookups:
+            if lookup in qs.model._fields and isinstance(
+                qs.model._fields[lookup], ForeignKeyField
+            ):
+                qs._prefetch_related.add(lookup)
+        return qs
+
+    def aggregate(self, **annotations) -> Dict[str, Any]:
+        """Compute aggregate values (e.g., SUM, COUNT)."""
+        qs = self.clone()
+        qs = qs.annotate(**annotations)
+        qs.query_parts["select"] = [
+            f"{expr.sql} AS {alias}" for alias, expr in annotations.items()
+            if isinstance(expr, Expression)
+        ]
+        result = qs.execute()
+        return result[0] if result else {}
 
     def where(self, *args, **kwargs) -> "QuerySet":
         qs = self.clone()
-
-        # Process Q objects
         for arg in args:
             if isinstance(arg, Q):
                 sql, params = qs._process_q_object(arg, [])
@@ -522,7 +691,6 @@ class QuerySet:
             else:
                 qs.query_parts["where"].append(str(arg))
 
-        # Process keyword arguments
         if kwargs:
             q = Q(**kwargs)
             sql, params = qs._process_q_object(q, [])
@@ -539,9 +707,7 @@ class QuerySet:
             if isinstance(expression, F):
                 select_parts.append(f"{expression.field} AS {alias}")
             elif isinstance(expression, Expression):
-                select_parts.append(
-                    f"({expression.sql.replace('?', qs.__get_next_param())}) AS {alias}"
-                )
+                select_parts.append(f"({expression.sql}) AS {alias}")
                 qs.params.extend(expression.params)
             else:
                 select_parts.append(f"{expression} AS {alias}")
@@ -572,18 +738,12 @@ class QuerySet:
             elif field.startswith("-"):
                 order_parts.append(f"{field[1:]} DESC")
             else:
-                order_parts.append(f"{qs.model.Meta.table_name}.{field} ASC")
+                order_parts.append(f"{self.model.table_name()}.{field} ASC")
 
         qs.query_parts["order_by"] = order_parts
         return qs
 
     def select_related(self, *fields) -> "QuerySet":
-        """
-        Include related objects in the query results.
-
-        Args:
-            *fields: Names of foreign key fields to include
-        """
         qs = self.clone()
         for field in fields:
             if field in qs.model._fields and isinstance(
@@ -592,14 +752,9 @@ class QuerySet:
                 qs._selected_related.add(field)
         return qs
 
-    def join(
-        self,
-        table: Any,
-        on: Union[str, Expression],
-        join_type: Union[str, JoinType] = JoinType.INNER,
-    ) -> "QuerySet":
+    def join(self, table: Any, on: Union[str, Expression], join_type: Union[str, JoinType] = JoinType.INNER) -> "QuerySet":
         qs = self.clone()
-        joined_table = table.Meta.table_name if hasattr(table, "Meta") else table
+        joined_table = table.table_name() if hasattr(table, "table_name") else table
 
         if isinstance(join_type, JoinType):
             join_type = join_type.value
@@ -623,7 +778,7 @@ class QuerySet:
                 group_parts.append(field.sql)
                 qs.params.extend(field.params)
             else:
-                group_parts.append(f"{qs.model.Meta.table_name}.{field}")
+                group_parts.append(f"{self.model.table_name()}.{field}")
 
         qs.query_parts["group_by"] = group_parts
         return qs
@@ -642,9 +797,7 @@ class QuerySet:
         qs.query_parts["having"] = having_parts
         return qs
 
-    def window(
-        self, alias: str, partition_by: List = None, order_by: List = None
-    ) -> "QuerySet":
+    def window(self, alias: str, partition_by: List = None, order_by: List = None) -> "QuerySet":
         qs = self.clone()
         parts = [f"{alias} AS ("]
 
@@ -667,7 +820,7 @@ class QuerySet:
                 partition_parts.append(field.sql)
                 qs.params.extend(field.params)
             else:
-                partition_parts.append(f"{self.model.Meta.table_name}.{field}")
+                partition_parts.append(f"{self.model.table_name()}.{field}")
         return f"PARTITION BY {', '.join(partition_parts)}"
 
     def _process_order_by(self, order_by: List, qs: "QuerySet") -> str:
@@ -679,9 +832,9 @@ class QuerySet:
                 order_parts.append(field.sql)
                 qs.params.extend(field.params)
             elif field.startswith("-"):
-                order_parts.append(f"{qs.model.Meta.table_name}.{field[1:]} DESC")
+                order_parts.append(f"{self.model.table_name()}.{field[1:]} DESC")
             else:
-                order_parts.append(f"{qs.model.Meta.table_name}.{field} ASC")
+                order_parts.append(f"{self.model.table_name()}.{field} ASC")
         return f"ORDER BY {', '.join(order_parts)}"
 
     def limit(self, limit: int) -> "QuerySet":
@@ -708,9 +861,7 @@ class QuerySet:
         qs._skip_locked = skip_locked
         return qs
 
-    def with_recursive(
-        self, name: str, initial_query: str, recursive_query: str
-    ) -> "QuerySet":
+    def with_recursive(self, name: str, initial_query: str, recursive_query: str) -> "QuerySet":
         qs = self.clone()
         cte = f"WITH RECURSIVE {name} AS ({initial_query} UNION ALL {recursive_query})"
         qs.query_parts["with"].append(cte)
@@ -753,32 +904,13 @@ class QuerySet:
         return new_qs
 
     def subquery(self, alias: str) -> Expression:
-        """Convert this queryset into a subquery expression"""
         sql, params = self.to_sql()
         return Expression(f"({sql}) AS {alias}", params)
 
     def to_sql(self) -> Tuple[str, List]:
-        """Convert the QuerySet into an SQL query string and parameters"""
         if "raw_sql" in self.query_parts:
             return self.query_parts["raw_sql"], self.params
-
-        parts = []
-        self._build_sql_parts(parts)
-        return " ".join(parts), self.params
-
-    def _build_sql_parts(self, parts):
-        self._add_with_clause(parts)
-        self._add_select_clause(parts)
-        self._add_from_clause(parts)
-        self._add_joins_clause(parts)
-        self._add_where_clause(parts)
-        self._add_group_by_clause(parts)
-        self._add_having_clause(parts)
-        self._add_window_clause(parts)
-        self._add_order_by_clause(parts)
-        self._add_limit_clause(parts)
-        self._add_offset_clause(parts)
-        self._add_locking_clauses(parts)
+        return self._builder.build_sql()
 
     def _add_with_clause(self, parts):
         if self.query_parts["with"]:
@@ -787,9 +919,12 @@ class QuerySet:
     def _add_select_clause(self, parts):
         select_clause = "SELECT"
         if self._distinct:
-            select_clause += " DISTINCT"
+            if self._distinct_on:
+                fields = ", ".join(self._distinct_on)
+                select_clause += f" DISTINCT ON ({fields})"
+            else:
+                select_clause += " DISTINCT"
 
-        # Add selected fields
         select_related_fields = []
         for field in self._selected_related:
             related_table = self.model._fields[field].to_model
@@ -801,7 +936,7 @@ class QuerySet:
         parts.append(select_clause)
 
     def _add_from_clause(self, parts):
-        parts.append(f"FROM {self.model.Meta.table_name}")
+        parts.append(f"FROM {self.model.table_name()}")
 
     def _add_joins_clause(self, parts):
         if self.query_parts["joins"]:
@@ -842,48 +977,97 @@ class QuerySet:
 
     def _add_locking_clauses(self, parts):
         if self._for_update:
-            parts.append("FOR UPDATE")
+            lock_clause = "FOR UPDATE"
+            if self._for_update_of:
+                lock_clause += f" OF {', '.join(self._for_update_of)}"
+            if self._no_key:
+                lock_clause += " NO KEY"
             if self._nowait:
-                parts.append("NOWAIT")
+                lock_clause += " NOWAIT"
             elif self._skip_locked:
-                parts.append("SKIP LOCKED")
+                lock_clause += " SKIP LOCKED"
+            parts.append(lock_clause)
         elif self._for_share:
-            parts.append("FOR SHARE")
+            lock_clause = "FOR SHARE"
+            if self._for_update_of:
+                lock_clause += f" OF {', '.join(self._for_update_of)}"
+            if self._no_key:
+                lock_clause += " NO KEY"
             if self._nowait:
-                parts.append("NOWAIT")
+                lock_clause += " NOWAIT"
             elif self._skip_locked:
-                parts.append("SKIP LOCKED")
+                lock_clause += " SKIP LOCKED"
+            parts.append(lock_clause)
 
-    def execute(self) -> List[Tuple]:
-        """Execute the query and return results"""
+    def execute(self) -> List[Dict[str, Any]]:
+        """Execute the query and return results, handling prefetch_related."""
         sql, params = self.to_sql()
-        result = self.model.get_session().fetch_all(sql, params)
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            print(sql, params)
+            result = tx.fetch_all(sql, params)
+        
+        if self._prefetch_related:
+            result = self._handle_prefetch_related(result)
+        
         return result
+
+    def _handle_prefetch_related(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Fetch related objects for prefetch_related lookups."""
+        for lookup in self._prefetch_related:
+            field = self.model._fields[lookup]
+            related_model = field.to_model
+            related_field = field.related_field
+
+            # Get unique foreign key values
+            fk_values = {row[lookup] for row in results if row[lookup] is not None}
+            if not fk_values:
+                continue
+
+            # Query related objects
+            related_qs = related_model.objects(alias=self.alias).filter(
+                **{f"{related_field}__in": fk_values}
+            )
+            related_data = related_qs.execute()
+
+            # Map foreign key values to related objects
+            fk_to_related = {row[related_field]: row for row in related_data}
+
+            # Attach related objects to results
+            for row in results:
+                fk_value = row.get(lookup)
+                if fk_value in fk_to_related:
+                    row[f"{lookup}_data"] = fk_to_related[fk_value]
+                else:
+                    row[f"{lookup}_data"] = None
+
+        return results
 
     def count(self) -> int:
-        """Return the count of rows that would be returned by this query"""
+        """Return the count of rows that would be returned by this query."""
         qs = self.clone()
         qs.query_parts["select"] = ["COUNT(*)"]
-        qs.query_parts["order_by"] = []  # Clear order_by as it's unnecessary for count
+        qs.query_parts["order_by"] = []
         sql, params = qs.to_sql()
-
-        # Execute count query
-        result = self.model.get_session().fetch_all(sql, params)
-        return result
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.fetch_all(sql, params)
+        return result[0]["count"] if result else 0
 
     def exists(self) -> bool:
-        """Return True if the query would return any results"""
+        """Return True if the query would return any results."""
         qs = self.clone()
         qs.query_parts["select"] = ["1"]
         qs.query_parts["order_by"] = []
         qs = qs.limit(1)
         sql, params = qs.to_sql()
-
-        result = self.model.get_session().fetch_all(sql, params)
-        return result
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.fetch_all(sql, params)
+        return bool(result)
 
     def update(self, **kwargs) -> int:
-        """Update records that match the query conditions"""
+        """Update records that match the query conditions."""
         updates = []
         params = []
 
@@ -902,55 +1086,51 @@ class QuerySet:
             f"({condition})" for condition in self.query_parts["where"]
         )
 
-        sql = f"UPDATE {self.model.Meta.table_name} SET {', '.join(updates)}"
+        sql = f"UPDATE {self.model.table_name()} SET {', '.join(updates)}"
         if where_sql:
             sql += f" WHERE {where_sql}"
         params = self.params + params
-        result = self.model.get_session().bulk_change(sql, [params], 1)
-        return result
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.bulk_change(sql, [params], 1)
+        return result or 0
 
     def delete(self) -> int:
-        """Delete records that match the query conditions"""
+        """Delete records that match the query conditions."""
         where_sql = " AND ".join(
             f"({condition})" for condition in self.query_parts["where"]
         )
 
-        sql = f"DELETE FROM {self.model.Meta.table_name}"
+        sql = f"DELETE FROM {self.model.table_name()}"
         if where_sql:
             sql += f" WHERE {where_sql}"
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.bulk_change(sql, [self.params], 1)
+        return result or 0
 
-        return self.model.get_session().bulk_change(sql, [self.params], 1)
-
-    def bulk_create(self, objs: List[Any], batch_size: int | None = None) -> int | None:
-        """Insert multiple records in an efficient way"""
+    def bulk_create(self, objs: List[Any], batch_size: int | None = None) -> Optional[int]:
+        """Insert multiple records in an efficient way."""
         if not objs:
-            return
+            return None
 
-        # Get fields from the first object
         fields = [
             name for name, f in self.model._fields.items() if not f.auto_increment
         ]
         placeholders = ",".join([self.__get_next_param() for _ in fields])
+        self._param_counter += len(fields) * len(objs)
 
-        sql = f"INSERT INTO {self.model.Meta.table_name} ({','.join(fields)}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {self.model.table_name()} ({','.join(fields)}) VALUES ({placeholders})"
 
-        values = []
-        for obj in objs:
-            values.append([obj._data[i] for i in fields])
+        values = [[obj._data.get(name, None) for name in fields] for obj in objs]
 
-        return self.model.get_session().bulk_change(
-            sql, values, batch_size or len(values)
-        )
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.bulk_change(sql, values, batch_size or len(values))
+        return result
 
-    def explain(
-        self,
-        analyze: bool = False,
-        verbose: bool = False,
-        costs: bool = False,
-        buffers: bool = False,
-        timing: bool = False,
-    ) -> Dict:
-        """Get the query execution plan"""
+    def explain(self, analyze: bool = False, verbose: bool = False, costs: bool = False, buffers: bool = False, timing: bool = False) -> Dict:
+        """Get the query execution plan."""
         options = []
         if analyze:
             options.append("ANALYZE")
@@ -965,6 +1145,7 @@ class QuerySet:
 
         sql, params = self.to_sql()
         explain_sql = f"EXPLAIN ({' '.join(options)}) {sql}"
-
-        result = self.model.get_session().fetch_all(explain_sql, params)
+        session = self.model.get_session(alias=self.alias)
+        with session as tx:
+            result = tx.fetch_all(explain_sql, params)
         return result

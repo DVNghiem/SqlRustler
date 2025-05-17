@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -6,9 +7,86 @@ from typing import Any, Optional, Union
 from sqlrustler.exceptions import DBFieldValidationError
 
 
+class TypeMapper(ABC):
+    """Strategy for mapping Python field types to database-specific SQL types."""
+    
+    @abstractmethod
+    def get_sql_type(self, field_type: str, **kwargs) -> str:
+        pass
+
+
+class PostgresTypeMapper(TypeMapper):
+    def get_sql_type(self, field_type: str, **kwargs) -> str:
+        type_mapping = {
+            "int": "INTEGER",
+            "str": f"VARCHAR({kwargs.get('max_length', 255)})",
+            "float": "FLOAT",
+            "bool": "BOOLEAN",
+            "datetime": "TIMESTAMP",
+            "date": "DATE",
+            "text": "TEXT",
+            "json": "JSONB",
+            "array": f"{kwargs.get('base_field').sql_type()}[]",
+            "decimal": f"DECIMAL({kwargs.get('max_digits', 10)},{kwargs.get('decimal_places', 2)})",
+        }
+        return type_mapping.get(field_type, "VARCHAR(255)")
+
+
+class MySqlTypeMapper(TypeMapper):
+    def get_sql_type(self, field_type: str, **kwargs) -> str:
+        type_mapping = {
+            "int": "INTEGER",
+            "str": f"VARCHAR({kwargs.get('max_length', 255)})",
+            "float": "FLOAT",
+            "bool": "TINYINT(1)",
+            "datetime": "DATETIME",
+            "date": "DATE",
+            "text": "TEXT",
+            "json": "JSON",
+            "array": "TEXT",  # MySQL doesn't support arrays; store as JSON or TEXT
+            "decimal": f"DECIMAL({kwargs.get('max_digits', 10)},{kwargs.get('decimal_places', 2)})",
+        }
+        return type_mapping.get(field_type, "VARCHAR(255)")
+
+
+class FieldFactory:
+    """Factory for creating database-specific Field instances."""
+    
+    @staticmethod
+    def create_field(database_type: str, field_type: str, **kwargs) -> 'Field':
+        field_classes = {
+            "postgres": {
+                "int": IntegerField,
+                "str": CharField,
+                "float": FloatField,
+                "bool": BooleanField,
+                "datetime": DateTimeField,
+                "date": DateField,
+                "text": TextField,
+                "json": JSONField,
+                "array": ArrayField,
+                "decimal": DecimalField,
+            },
+            "mysql": {
+                "int": IntegerField,
+                "str": CharField,
+                "float": FloatField,
+                "bool": BooleanField,
+                "datetime": DateTimeField,
+                "date": DateField,
+                "text": TextField,
+                "json": JSONField,
+                "array": ArrayField,
+                "decimal": DecimalField,
+            },
+        }
+        cls = field_classes.get(database_type.lower(), {}).get(field_type, Field)
+        return cls(field_type=field_type, **kwargs)
+
+
 class Field:
     """Base field class for ORM-like field definitions."""
-
+    
     def __init__(
         self,
         field_type: str,
@@ -19,6 +97,7 @@ class Field:
         index: bool = False,
         validators: Optional[list] = None,
         auto_increment: bool = False,
+        database_type: str = "postgres",  # Default to postgres
     ):
         self.field_type = field_type
         self.primary_key = primary_key
@@ -30,13 +109,30 @@ class Field:
         self.name = None
         self.model = None
         self.auto_increment = auto_increment
+        self.database_type = database_type
+        self.type_mapper = self._get_type_mapper()
+
+    def _get_type_mapper(self) -> TypeMapper:
+        mappers = {
+            "postgres": PostgresTypeMapper(),
+            "mysql": MySqlTypeMapper(),
+        }
+        return mappers.get(self.database_type.lower(), PostgresTypeMapper())
 
     def validate(self, value: Any) -> None:
+        """Template method for validation."""
         if value is None:
             if not self.null:
                 raise DBFieldValidationError(f"Field {self.name} cannot be null")
             return
+        self._validate_type(value)
+        self._run_validators(value)
 
+    def _validate_type(self, value: Any) -> None:
+        """Hook for type-specific validation."""
+        pass
+
+    def _run_validators(self, value: Any) -> None:
         for validator in self.validators:
             try:
                 validator(value)
@@ -46,47 +142,29 @@ class Field:
                 )
 
     def sql_type(self) -> str:
-        """Return SQL type definition for the field."""
-        type_mapping = {
-            "int": "INTEGER",
-            "str": "VARCHAR(255)",
-            "float": "FLOAT",
-            "bool": "BOOLEAN",
-            "datetime": "TIMESTAMP",
-            "date": "DATE",
-            "text": "TEXT",
-            "json": "JSONB",
-            "array": "ARRAY",
-            "decimal": "DECIMAL",
-        }
-        return type_mapping.get(self.field_type, "VARCHAR(255)")
+        return self.type_mapper.get_sql_type(self.field_type)
+
 
 class CharField(Field):
     def __init__(self, max_length: int = 255, **kwargs):
-        super().__init__(field_type="str", **kwargs)
+        super().__init__(field_type="str", max_length=max_length, **kwargs)
         self.max_length = max_length
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            if not isinstance(value, str):
-                raise DBFieldValidationError(f"Field {self.name} must be a string")
-            if len(value) > self.max_length:
-                raise DBFieldValidationError(
-                    f"Field {self.name} cannot exceed {self.max_length} characters"
-                )
-
-    def sql_type(self) -> str:
-        return f"VARCHAR({self.max_length})"
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, str):
+            raise DBFieldValidationError(f"Field {self.name} must be a string")
+        if len(value) > self.max_length:
+            raise DBFieldValidationError(
+                f"Field {self.name} cannot exceed {self.max_length} characters"
+            )
 
 
 class TextField(Field):
     def __init__(self, **kwargs):
         super().__init__(field_type="text", **kwargs)
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None and not isinstance(value, str):
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, str):
             raise DBFieldValidationError(f"Field {self.name} must be a string")
 
 
@@ -94,35 +172,30 @@ class IntegerField(Field):
     def __init__(self, **kwargs):
         super().__init__(field_type="int", **kwargs)
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            try:
-                int(value)
-            except (TypeError, ValueError):
-                raise DBFieldValidationError(f"Field {self.name} must be an integer")
+    def _validate_type(self, value: Any) -> None:
+        try:
+            int(value)
+        except (TypeError, ValueError):
+            raise DBFieldValidationError(f"Field {self.name} must be an integer")
 
 
 class FloatField(Field):
     def __init__(self, **kwargs):
         super().__init__(field_type="float", **kwargs)
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            try:
-                float(value)
-            except (TypeError, ValueError):
-                raise DBFieldValidationError(f"Field {self.name} must be a float")
+    def _validate_type(self, value: Any) -> None:
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            raise DBFieldValidationError(f"Field {self.name} must be a float")
 
 
 class BooleanField(Field):
     def __init__(self, **kwargs):
         super().__init__(field_type="bool", **kwargs)
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None and not isinstance(value, bool):
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, bool):
             raise DBFieldValidationError(f"Field {self.name} must be a boolean")
 
 
@@ -132,9 +205,8 @@ class DateTimeField(Field):
         self.auto_now = auto_now
         self.auto_now_add = auto_now_add
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None and not isinstance(value, datetime):
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, datetime):
             raise DBFieldValidationError(f"Field {self.name} must be a datetime object")
 
 
@@ -144,9 +216,8 @@ class DateField(Field):
         self.auto_now = auto_now
         self.auto_now_add = auto_now_add
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None and not isinstance(value, date):
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, date):
             raise DBFieldValidationError(f"Field {self.name} must be a date object")
 
 
@@ -154,71 +225,69 @@ class JSONField(Field):
     def __init__(self, **kwargs):
         super().__init__(field_type="json", **kwargs)
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            try:
-                json.dumps(value)
-            except (TypeError, ValueError):
-                raise DBFieldValidationError(
-                    f"Field {self.name} must be JSON serializable"
-                )
+    def _validate_type(self, value: Any) -> None:
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            raise DBFieldValidationError(
+                f"Field {self.name} must be JSON serializable"
+            )
 
 
 class ArrayField(Field):
     def __init__(self, base_field: Field, **kwargs):
-        super().__init__(field_type="array", **kwargs)
+        super().__init__(field_type="array", base_field=base_field, **kwargs)
         self.base_field = base_field
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            if not isinstance(value, (list, tuple)):
-                raise DBFieldValidationError(
-                    f"Field {self.name} must be a list or tuple"
-                )
-            for item in value:
-                self.base_field.validate(item)
+    def _validate_type(self, value: Any) -> None:
+        if not isinstance(value, (list, tuple)):
+            raise DBFieldValidationError(
+                f"Field {self.name} must be a list or tuple"
+            )
+        for item in value:
+            self.base_field.validate(item)
 
     def sql_type(self) -> str:
-        return f"{self.base_field.sql_type()}[]"
+        return self.type_mapper.get_sql_type(self.field_type, base_field=self.base_field)
 
 
 class DecimalField(Field):
     def __init__(self, max_digits: int = 10, decimal_places: int = 2, **kwargs):
-        super().__init__(field_type="decimal", **kwargs)
+        super().__init__(
+            field_type="decimal",
+            max_digits=max_digits,
+            decimal_places=decimal_places,
+            **kwargs
+        )
         self.max_digits = max_digits
         self.decimal_places = decimal_places
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None:
-            try:
-                decimal_value = Decimal(str(value))
-                decimal_tuple = decimal_value.as_tuple()
-                if (
-                    len(decimal_tuple.digits) - (-decimal_tuple.exponent)
-                    > self.max_digits
-                ):
-                    raise DBFieldValidationError(
-                        f"Field {self.name} exceeds maximum digits {self.max_digits}"
-                    )
-                if -decimal_tuple.exponent > self.decimal_places:
-                    raise DBFieldValidationError(
-                        f"Field {self.name} exceeds maximum decimal places {self.decimal_places}"
-                    )
-            except InvalidOperation:
+    def _validate_type(self, value: Any) -> None:
+        try:
+            decimal_value = Decimal(str(value))
+            total_digits = len(decimal_value.as_tuple().digits)
+            if total_digits > self.max_digits:
                 raise DBFieldValidationError(
-                    f"Field {self.name} must be a valid decimal number"
+                    f"Field {self.name} exceeds maximum digits {self.max_digits}"
                 )
+            if decimal_value.as_tuple().exponent < -self.decimal_places:
+                raise DBFieldValidationError(
+                    f"Field {self.name} exceeds maximum decimal places {self.decimal_places}"
+                )
+        except (InvalidOperation, ValueError):
+            raise DBFieldValidationError(
+                f"Field {self.name} must be a valid decimal number"
+            )
 
     def sql_type(self) -> str:
-        return f"DECIMAL({self.max_digits},{self.decimal_places})"
+        return self.type_mapper.get_sql_type(
+            self.field_type,
+            max_digits=self.max_digits,
+            decimal_places=self.decimal_places
+        )
 
 
 class ForeignKeyField(Field):
-    """Field for foreign key relationships."""
-
     def __init__(
         self,
         to_model: Union[str, Any],
@@ -262,13 +331,13 @@ class ForeignKeyField(Field):
                 "Field must be nullable to use SET NULL referential action"
             )
 
-    def validate(self, value: Any) -> None:
-        super().validate(value)
-        if value is not None and not isinstance(self.to_model, str):
-            related_field_obj = getattr(self.to_model, self.related_field)
-            try:
-                related_field_obj.validate(value)
-            except DBFieldValidationError as e:
-                raise DBFieldValidationError(
-                    f"Foreign key {self.name} validation failed: {str(e)}"
-                )
+    def _validate_type(self, value: Any) -> None:
+        if isinstance(self.to_model, str):
+            return  # Defer validation for string-based models
+        related_field_obj = getattr(self.to_model, self.related_field)
+        try:
+            related_field_obj.validate(value)
+        except DBFieldValidationError as e:
+            raise DBFieldValidationError(
+                f"Foreign key {self.name} validation failed: {str(e)}"
+            )

@@ -1,57 +1,63 @@
 import re
 from datetime import date, datetime
-
-from sqlrustler.exceptions import OutOfScopeApplicationException
+from typing import Optional
 
 from .field import Field, ForeignKeyField
 from .query import QuerySet
+from .sqlrustler import Session
+
+
+
+def to_snake_case(name: str) -> str:
+    """Convert CamelCase to snake_case."""
+    return re.sub("(?!^)([A-Z])", r"_\1", name).lower()
 
 
 class MetaModel(type):
     def __new__(mcs, name, bases, attrs):
-        # Skip initialization for base Model class
         if name == "Model" and not bases:
             return super().__new__(mcs, name, bases, attrs)
 
         fields = {}
         table_name = attrs.get("__tablename__")
+        alias = attrs.get("__alias__", "default")
 
-        # If table name not specified, convert CamelCase to snake_case
         if not table_name:
-            table_name = re.sub("(?!^)([A-Z])", r"_\1", name).lower()
+            table_name = to_snake_case(name)
 
-        # Collect all fields
         for key, value in list(attrs.items()):
             if isinstance(value, Field):
+                value.alias = alias
                 fields[key] = value
                 value.name = key
 
-        # Store metadata in class
         attrs["_fields"] = fields
         attrs["_table_name"] = table_name
+        attrs["_alias"] = alias
 
         return super().__new__(mcs, name, bases, attrs)
 
 
 class Model(metaclass=MetaModel):
+    _connection = None
+    _alias = "default"
+
+    @classmethod
+    def get_session(cls, alias: Optional[str] = None) -> Session:
+        """Get a session for query execution."""
+        return Session(alias=alias or cls._alias)
+
     def __init__(self, **kwargs):
         self._data = {}
-        # Set default values
         for name, field in self._fields.items():
             if field.default is not None:
                 self._data[name] = field.default
-
-        # Set provided values
-        for key, value in kwargs.items():
-            if key in self._fields:
-                self._fields[key].validate(value)
-                self._data[key] = value
-            else:
-                raise ValueError(f"Unknown field {key}")
+            if name in kwargs:
+                self._data[name] = kwargs[name]
 
     @classmethod
-    def objects(cls) -> QuerySet:
-        return QuerySet(cls)
+    def objects(cls, alias: Optional[str] = None) -> QuerySet:
+        return QuerySet(cls, alias=alias or cls._alias)
 
     @classmethod
     def table_name(cls) -> str:
@@ -73,7 +79,7 @@ class Model(metaclass=MetaModel):
         fields_sql.extend(foreign_keys)
         joined_fields_sql = ", \n ".join(fields_sql)
 
-        create_table = f"CREATE TABLE {cls.table_name()} (\n  {joined_fields_sql} \n"
+        create_table = f"CREATE TABLE {cls.table_name()} (\n  {joined_fields_sql} \n)"
 
         return f"{create_table};\n" + ";\n".join(indexes_sql)
 
@@ -82,6 +88,8 @@ class Model(metaclass=MetaModel):
         field_def = [f"{name} {field.sql_type()}"]
         if field.primary_key:
             field_def.append("PRIMARY KEY")
+        if field.auto_increment and field.sql_type().lower() in ("integer", "int"):
+            field_def.append("AUTO_INCREMENT")
         if not field.null:
             field_def.append("NOT NULL")
         if field.unique:
@@ -103,5 +111,7 @@ class Model(metaclass=MetaModel):
         return f"FOREIGN KEY ({name}) REFERENCES {target_table}({field.related_field}) ON DELETE {field.on_delete} ON UPDATE {field.on_update}"
 
     def save(self):
-        query_object = QuerySet(self)
+        for name, value in self._data.items():
+            self._fields[name].validate(value)
+        query_object = QuerySet(self, alias=self._alias)
         query_object.bulk_create([self])

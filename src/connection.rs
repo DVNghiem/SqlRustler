@@ -5,13 +5,14 @@ use tokio::runtime::Runtime;
 use std::sync::Arc;
 
 use crate::{
-    config::{DatabaseConfig, DatabasePool},
+    config::{DatabaseConfig, DatabasePool, DatabaseType},
     error::DatabaseError,
     transaction::Transaction,
 };
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CONNECTION: OnceCell<DashMap<String, Arc<Connection>>> = OnceCell::new();
+static DB_TYPE_WITH_ALIAS: OnceCell<DashMap<String, DatabaseType>> = OnceCell::new();
 
 pub fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().unwrap())
@@ -64,6 +65,28 @@ pub fn set_connection(connection: Connection, alias: String) -> Result<(), Datab
     conn_map.insert(alias, Arc::new(connection));
     Ok(())
 }
+
+fn set_db_type_with_alias(db_type: DatabaseType, alias: String) -> Result<(), DatabaseError> {
+    let db_type_map = DB_TYPE_WITH_ALIAS.get_or_init(|| DashMap::new());
+    if db_type_map.contains_key(&alias) {
+        return Err(DatabaseError::Configuration("Database type already set".into()));
+    }
+    db_type_map.insert(alias, db_type);
+    Ok(())
+}
+
+#[pyfunction]
+pub fn get_db_type_with_alias(alias: &str) -> Result<DatabaseType, DatabaseError> {
+    DB_TYPE_WITH_ALIAS
+        .get()
+        .ok_or(DatabaseError::NotConnected)
+        .and_then(|db_map| {
+            db_map.get(alias)
+                .map(|db| db.clone())
+                .ok_or(DatabaseError::NotConnected)
+        })
+}
+
 #[pyclass]
 pub struct DatabaseConnection;
 
@@ -73,9 +96,10 @@ impl DatabaseConnection {
     pub fn connect(config: DatabaseConfig, alias: Option<String>, py: Python) -> PyResult<()> {
         let alias = alias.unwrap_or_else(|| "default".to_string());
         let connection = py.allow_threads(|| {
-            get_runtime().block_on(async { Connection::new(config).await })
+            get_runtime().block_on(async { Connection::new(config.clone()).await })
         })?;
-        set_connection(connection, alias)?;
+        set_connection(connection, alias.clone())?;
+        set_db_type_with_alias(config.driver, alias.clone())?;
         Ok(())
     }
 }

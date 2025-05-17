@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 class DatabaseType(Enum, str):
     Postgres = "POSTGRESQL"
-    MySQL = "MYSQL"
+    MySql = "MYSQL"
     SQLite = "SQLITE"
 
 
@@ -23,7 +23,7 @@ class DatabaseConfig:
 class DatabaseConnection:
 
     @staticmethod
-    def connect(config: DatabaseConfig): ...
+    def connect(config: DatabaseConfig, alias: str | None): ...
 
 
 @dataclass
@@ -59,3 +59,8 @@ class Session:
     def __enter__(self) -> TransactionWrapper: ...
     def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
    
+def get_db_type_with_alias(alias: str) -> DatabaseType:
+    """Get the database type for a given alias."""
+    # This function should return the database type based on the alias.
+    # For now, we will return a default value.
+    ...
