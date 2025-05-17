@@ -1,89 +1,17 @@
-from enum import Enum
 from typing import Any, Dict, List, Tuple, Union, Optional
 from abc import ABC, abstractmethod
 import decimal
 import datetime
 import json
+from .enum import Operator, JoinType
+from .F import F
+from .express import Expression
+from .adaptor import DatabaseAdapter, PostgresAdapter, MySqlAdapter
+from .exceptions import DoesNotExist, MultipleObjectsReturned
+from .Q import Q
 
 from .field import ForeignKeyField
 from .sqlrustler import get_db_type_with_alias, DatabaseType
-
-
-class DoesNotExist(Exception):
-    """Raised when a query returns no results when exactly one is expected."""
-    pass
-
-
-class MultipleObjectsReturned(Exception):
-    """Raised when a query returns multiple results when exactly one is expected."""
-    pass
-
-
-class JoinType(Enum):
-    INNER = "INNER JOIN"
-    LEFT = "LEFT JOIN"
-    RIGHT = "RIGHT JOIN"
-    FULL = "FULL JOIN"
-    CROSS = "CROSS JOIN"
-
-
-class Operator(Enum):
-    EQ = "="
-    GT = ">"
-    LT = "<"
-    GTE = ">="
-    LTE = "<="
-    NEQ = "!="
-    IN = "IN"
-    NOT_IN = "NOT IN"
-    LIKE = "LIKE"
-    ILIKE = "ILIKE"
-    BETWEEN = "BETWEEN"
-    IS_NULL = "IS NULL"
-    IS_NOT_NULL = "IS NOT NULL"
-    REGEXP = "~"
-    IREGEXP = "~*"
-
-
-class DatabaseAdapter(ABC):
-    """Adapter for database-specific SQL generation and operator support."""
-    
-    @abstractmethod
-    def get_placeholder(self, counter: int) -> str:
-        pass
-
-    @abstractmethod
-    def supports_operator(self, op: str) -> bool:
-        pass
-
-    @abstractmethod
-    def format_operator(self, op: str) -> str:
-        pass
-
-
-class PostgresAdapter(DatabaseAdapter):
-    def get_placeholder(self, counter: int) -> str:
-        return f"${counter}"
-
-    def supports_operator(self, op: str) -> bool:
-        return op in {e.value for e in Operator}
-
-    def format_operator(self, op: str) -> str:
-        return op
-
-
-class MySqlAdapter(DatabaseAdapter):
-    def get_placeholder(self, counter: int) -> str:
-        return "?"
-
-    def supports_operator(self, op: str) -> bool:
-        unsupported = {"ILIKE", "~", "~*"}
-        return op not in unsupported
-
-    def format_operator(self, op: str) -> str:
-        if op == "ILIKE":
-            return "LIKE"
-        return op
 
 
 class QueryBuilder(ABC):
@@ -126,260 +54,6 @@ class MySqlQueryBuilder(QueryBuilder):
     def _get_adapter(self) -> DatabaseAdapter:
         return MySqlAdapter()
 
-
-class Expression:
-    def __init__(self, sql: str, params: list):
-        self.sql = sql
-        self.params = params
-
-    def over(self, partition_by=None, order_by=None, frame=None, window_name=None):
-        if window_name:
-            self.sql = f"{self.sql} OVER {window_name}"
-            return self
-
-        parts = ["OVER("]
-        clauses = []
-
-        if partition_by:
-            if isinstance(partition_by, str):
-                partition_by = [partition_by]
-            formatted_fields = [f.replace("__", ".") for f in partition_by]
-            clauses.append(f"PARTITION BY {', '.join(formatted_fields)}")
-
-        if order_by:
-            if isinstance(order_by, str):
-                order_by = [order_by]
-            formatted_order = []
-            for field in order_by:
-                if isinstance(field, str):
-                    if field.startswith("-"):
-                        field = f"{field[1:]} DESC"
-                    elif field.startswith("+"):
-                        field = f"{field[1:]} ASC"
-                    if "__" in field:
-                        field = field.replace("__", ".")
-                formatted_order.append(field)
-            clauses.append(f"ORDER BY {', '.join(formatted_order)}")
-
-        if frame:
-            if isinstance(frame, str):
-                clauses.append(frame)
-            elif isinstance(frame, (list, tuple)):
-                frame_type = "ROWS"
-                if len(frame) == 3 and frame[0].upper() in ("ROWS", "RANGE", "GROUPS"):
-                    frame_type = frame[0].upper()
-                    frame = frame[1:]
-                frame_clause = f"{frame_type} BETWEEN {frame[0]} AND {frame[1]}"
-                clauses.append(frame_clause)
-
-        parts.append(" ".join(clauses))
-        parts.append(")")
-        self.sql = f"{self.sql} {' '.join(parts)}"
-        return self
-
-
-class F:
-    def __init__(self, field: str):
-        self.field = field.replace("__", ".")
-
-    def __add__(self, other):
-        if isinstance(other, F):
-            return Expression(f"{self.field} + {other.field}", [])
-        return Expression(f"{self.field} + ?", [other])
-
-    def __sub__(self, other):
-        if isinstance(other, F):
-            return Expression(f"{self.field} - {other.field}", [])
-        return Expression(f"{self.field} - ?", [other])
-
-    def __mul__(self, other):
-        if isinstance(other, F):
-            return Expression(f"{self.field} * {other.field}", [])
-        return Expression(f"{self.field} * ?", [other])
-
-    def __truediv__(self, other):
-        if isinstance(other, F):
-            return Expression(f"{self.field} / {other.field}", [])
-        return Expression(f"{self.field} / ?", [other])
-
-    def sum(self):
-        return Expression(f"SUM({self.field})", [])
-
-    def avg(self):
-        return Expression(f"AVG({self.field})", [])
-
-    def count(self):
-        return Expression(f"COUNT({self.field})", [])
-
-    def max(self):
-        return Expression(f"MAX({self.field})", [])
-
-    def min(self):
-        return Expression(f"MIN({self.field})", [])
-
-    def lag(self, offset=1, default=None):
-        if default is None:
-            return Expression(f"LAG({self.field}, {offset})", [])
-        return Expression(f"LAG({self.field}, {offset}, ?)", [default])
-
-    def lead(self, offset=1, default=None):
-        if default is None:
-            return Expression(f"LEAD({self.field}, {offset})", [])
-        return Expression(f"LEAD({self.field}, {offset}, ?)", [default])
-
-    def row_number(self):
-        return Expression("ROW_NUMBER()", [])
-
-    def rank(self):
-        return Expression("RANK()", [])
-
-    def dense_rank(self):
-        return Expression("DENSE_RANK()", [])
-
-
-class Window:
-    def __init__(self, name: str, partition_by=None, order_by=None, frame=None):
-        self.name = name
-        self.partition_by = partition_by
-        self.order_by = order_by
-        self.frame = frame
-
-    def to_sql(self):
-        parts = [f"{self.name} AS ("]
-        clauses = []
-
-        if self.partition_by:
-            if isinstance(self.partition_by, str):
-                self.partition_by = [self.partition_by]
-            formatted_fields = [f.replace("__", ".") for f in self.partition_by]
-            clauses.append(f"PARTITION BY {', '.join(formatted_fields)}")
-
-        if self.order_by:
-            if isinstance(self.order_by, str):
-                self.order_by = [self.order_by]
-            formatted_order = []
-            for field in self.order_by:
-                if field.startswith("-"):
-                    field = f"{field[1:].replace('__', '.')} DESC"
-                elif field.startswith("+"):
-                    field = f"{field[1:].replace('__', '.')} ASC"
-                else:
-                    field = field.replace("__", ".")
-                formatted_order.append(field)
-            clauses.append(f"ORDER BY {', '.join(formatted_order)}")
-
-        # if frame:
-        #     if isinstance(frame, str):
-        #         clauses.append(frame)
-        #     elif isinstance(frame, (list, tuple)):
-        #         frame_type = "ROWS"
-        #         if len(frame) == 3 and frame[0].upper() in ("ROWS", "RANGE", "GROUPS"):
-        #             frame_type = frame[0].upper()
-        #             frame = frame[1:]
-        #         frame_clause = f"{frame_type} BETWEEN {frame[0]} AND {frame[1]}"
-        #         clauses.append(frame_clause)
-
-        parts.append(" ".join(clauses))
-        parts.append(")")
-        return " ".join(parts)
-
-
-class Q:
-    def __init__(self, *args, **kwargs):
-        self.children = list(args)
-        self.connector = "AND"
-        self.negated = False
-
-        if kwargs:
-            for key, value in kwargs.items():
-                condition = {key: value}
-                self.children.append(condition)
-
-    def __and__(self, other):
-        if getattr(other, "connector", "AND") == "AND" and not other.negated:
-            clone = self._clone()
-            clone.children.extend(other.children)
-            return clone
-        else:
-            q = Q()
-            q.connector = "AND"
-            q.children = [self, other]
-            return q
-
-    def __or__(self, other):
-        if getattr(other, "connector", "OR") == "OR" and not other.negated:
-            clone = self._clone()
-            clone.connector = "OR"
-            clone.children.extend(other.children)
-            return clone
-        else:
-            q = Q()
-            q.connector = "OR"
-            q.children = [self, other]
-            return q
-
-    def __invert__(self):
-        clone = self._clone()
-        clone.negated = not self.negated
-        return clone
-
-    def _clone(self):
-        clone = Q()
-        clone.connector = self.connector
-        clone.negated = self.negated
-        clone.children = self.children[:]
-        return clone
-
-    def add(self, child, connector):
-        if connector != self.connector:
-            self.children = [Q(*self.children, connector=self.connector)]
-            self.connector = connector
-
-        if isinstance(child, Q):
-            if child.connector == connector and not child.negated:
-                self.children.extend(child.children)
-            else:
-                self.children.append(child)
-        else:
-            self.children.append(child)
-
-    def _combine(self, other, connector):
-        if not other:
-            return self._clone()
-
-        if not self:
-            return other._clone() if isinstance(other, Q) else Q(other)
-
-        q = Q()
-        q.connector = connector
-        q.children = [self, other]
-        return q
-
-    def __bool__(self):
-        return bool(self.children)
-
-    def __str__(self):
-        if self.negated:
-            return f"NOT ({self._str_inner()})"
-        return self._str_inner()
-
-    def _str_inner(self):
-        if not self.children:
-            return ""
-
-        children_str = []
-        for child in self.children:
-            if isinstance(child, Q):
-                child_str = str(child)
-            elif isinstance(child, dict):
-                child_str = " AND ".join(f"{k}={v}" for k, v in child.items())
-            else:
-                child_str = str(child)
-            children_str.append(f"({child_str})")
-
-        return f" {self.connector} ".join(children_str)
-
-
 class QuerySet:
     def __init__(self, model, alias: str = "default"):
         self.model = model
@@ -408,6 +82,7 @@ class QuerySet:
         self._param_counter = 1
         self._selected_related = set()
         self._prefetch_related = set()
+        self._related_joins = set() 
         self._builder = self._get_builder()
 
     def _get_db_type(self) -> DatabaseType:
@@ -493,7 +168,26 @@ class QuerySet:
         field = parts[0]
         op = "=" if len(parts) == 1 else parts[1]
 
+        # Handle related model filters (e.g., company__name)
+        if len(parts) > 1 and field in self.model._fields and isinstance(self.model._fields[field], ForeignKeyField):
+            related_model = self.model._fields[field].to
+            related_field = parts[1]
+            op = parts[2] if len(parts) > 2 else "="
+            join_key = f"{field}__{related_model.table_name()}"
+            if join_key not in self._related_joins:
+                self.query_parts["joins"].append(
+                    f"LEFT JOIN {related_model.table_name()} ON {self.model.table_name()}.{field} = {related_model.table_name()}.{self.model._fields[field].related_field}"
+                )
+                self._related_joins.add(join_key)
+            param_name = self.__get_next_param()
+            formatted_op = self._builder.adapter.format_operator(op)
+            return f"{related_model.table_name()}.{related_field} {formatted_op} {param_name}", [value]
+
         if isinstance(value, F):
+            if value.params:
+                param_name = self.__get_next_param()
+                sql = value.field.replace("%s", param_name)
+                return sql, value.params
             return self._process_f_value(field, op, value)
         if isinstance(value, Expression):
             return self._process_expression_value(field, op, value)
@@ -611,16 +305,43 @@ class QuerySet:
             return value
     
     def _parse_row(self, row: List[Tuple[str, Any, str]]) -> Any:
-        """Parse a single row from Rust into a model instance."""
         parsed_data = {}
-        # Convert list of tuples to dict
+        related_data = {}
         row_dict = {col_name: (value, col_type) for col_name, value, col_type in row}
-        
+
+        # Process primary model fields
         for field_name, field in self.model._fields.items():
-            if field_name in row_dict:
-                value, col_type = row_dict[field_name]
+            # Try both table_name.field_name and field_name
+            col_name = f"{self.model.table_name()}.{field_name}"
+            alt_col_name = field_name
+            if col_name in row_dict:
+                value, col_type = row_dict[col_name]
                 parsed_data[field_name] = self._convert_value(value, col_type, field.field_type)
-        return self.model(**parsed_data)
+            elif alt_col_name in row_dict:
+                value, col_type = row_dict[alt_col_name]
+                parsed_data[field_name] = self._convert_value(value, col_type, field.field_type)
+
+        # Process foreign key fields
+        for field_name in self._selected_related:
+            if field_name in self.model._fields and isinstance(self.model._fields[field_name], ForeignKeyField):
+                related_model = self.model._fields[field_name].to_model
+                related_table = related_model.table_name()
+                related_fields = {
+                    k.split(f"{related_table}__")[1]: v
+                    for k, v in row_dict.items()
+                    if k.startswith(f"{related_table}__")
+                }
+                if related_fields and any(v[0] is not None for v in related_fields.values()):
+                    related_data[field_name] = related_model(**{
+                        k: self._convert_value(v[0], v[1], related_model._fields.get(k).field_type)
+                        for k, v in related_fields.items()
+                    })
+                else:
+                    related_data[field_name] = None
+
+        instance = self.model(**parsed_data)
+        instance._related_data = related_data
+        return instance
     
     def _infer_aggregate_type(self, expr: Expression, field_name: str) -> str:
         """Infer the result type of an aggregation expression."""
@@ -732,12 +453,9 @@ class QuerySet:
         return qs
 
     def prefetch_related(self, *lookups) -> "QuerySet":
-        """Specify related objects to prefetch in separate queries."""
         qs = self.clone()
         for lookup in lookups:
-            if lookup in qs.model._fields and isinstance(
-                qs.model._fields[lookup], ForeignKeyField
-            ):
+            if lookup in qs.model._fields and isinstance(qs.model._fields[lookup], ForeignKeyField):
                 qs._prefetch_related.add(lookup)
         return qs
 
@@ -773,6 +491,14 @@ class QuerySet:
             elif isinstance(arg, Expression):
                 qs.query_parts["where"].append(arg.sql)
                 qs.params.extend(arg.params)
+            elif isinstance(arg, F):
+                if arg.params:
+                    param_name = self.__get_next_param()
+                    sql = arg.field.replace("%s", param_name)
+                    qs.query_parts["where"].append(sql)
+                    qs.params.extend(arg.params)
+                else:
+                    qs.query_parts["where"].append(arg.field)
             else:
                 qs.query_parts["where"].append(str(arg))
 
@@ -831,25 +557,45 @@ class QuerySet:
     def select_related(self, *fields) -> "QuerySet":
         qs = self.clone()
         for field in fields:
-            if field in qs.model._fields and isinstance(
-                qs.model._fields[field], ForeignKeyField
-            ):
+            if field in qs.model._fields and isinstance(qs.model._fields[field], ForeignKeyField):
                 qs._selected_related.add(field)
+                related_model = qs.model._fields[field].to_model
+                join_key = f"{field}__{related_model.table_name()}"
+                # Check if a join for this table already exists
+                join_exists = any(
+                    related_model.table_name() in join
+                    for join in qs.query_parts["joins"]
+                )
+                if not join_exists:
+                    qs.query_parts["joins"].append(
+                        f"LEFT JOIN {related_model.table_name()} ON {qs.model.table_name()}.{field} = {related_model.table_name()}.{qs.model._fields[field].related_field}"
+                    )
+                    qs._related_joins.add(join_key)
+                # Add related fields with aliases
+                qs.query_parts["select"].extend([
+                    f"{related_model.table_name()}.{related_field} AS {related_model.table_name()}__{related_field}"
+                    for related_field in related_model._fields
+                ])
+        # Replace '*' with specific fields for the primary model
+        if "*" in qs.query_parts["select"]:
+            qs.query_parts["select"] = [
+                f"{qs.model.table_name()}.{field}"
+                for field in qs.model._fields
+            ] + [s for s in qs.query_parts["select"] if s != "*"]
         return qs
 
-    def join(self, table: Any, on: Union[str, Expression], join_type: Union[str, JoinType] = JoinType.INNER) -> "QuerySet":
+    def join(self, table: Any, on: Union[str, Expression, bool], join_type: Union[str, JoinType] = JoinType.INNER) -> "QuerySet":
         qs = self.clone()
         joined_table = table.table_name() if hasattr(table, "table_name") else table
-
         if isinstance(join_type, JoinType):
             join_type = join_type.value
-
         if isinstance(on, Expression):
             qs.query_parts["joins"].append(f"{join_type} {joined_table} ON {on.sql}")
             qs.params.extend(on.params)
+        elif isinstance(on, F):
+            qs.query_parts["joins"].append(f"{join_type} {joined_table} ON {on.field}")
         else:
             qs.query_parts["joins"].append(f"{join_type} {joined_table} ON {on}")
-
         return qs
 
     def group_by(self, *fields) -> "QuerySet":
@@ -1009,15 +755,7 @@ class QuerySet:
                 select_clause += f" DISTINCT ON ({fields})"
             else:
                 select_clause += " DISTINCT"
-
-        select_related_fields = []
-        for field in self._selected_related:
-            related_table = self.model._fields[field].to_model
-            select_related_fields.append(f"{related_table}.*")
-
-        select_clause += " " + ", ".join(
-            self.query_parts["select"] + select_related_fields
-        )
+        select_clause += " " + ", ".join(self.query_parts["select"])
         parts.append(select_clause)
 
     def _add_from_clause(self, parts):
@@ -1088,6 +826,7 @@ class QuerySet:
         """Execute the query and return results, handling prefetch_related."""
         sql, params = self.to_sql()
         session = self.model.get_session(alias=self.alias)
+        print(f"Executing SQL: {sql} with params: {params}")
         with session as tx:
             result = tx.fetch_all(sql, params)
         # Parse rows into model instances

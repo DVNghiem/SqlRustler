@@ -38,18 +38,26 @@ class MetaModel(type):
 
 
 class Model(metaclass=MetaModel):
-    _connection = None
     _alias = "default"
+    _abstract = True
 
     @classmethod
     def get_session(cls, alias: Optional[str] = None) -> Session:
         """Get a session for query execution."""
         return Session(alias=alias or cls._alias)
+    
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._fields = {}
+        for name, field in cls.__dict__.items():
+            if isinstance(field, Field):
+                field.name = name
+                field.owner = cls
+                cls._fields[name] = field
 
     def __init__(self, **kwargs: Any):
-        """Initialize model instance with field values."""
         self._data = {}
-        self._related_data = {}  # Store related model instances
+        self._related_data = {}
         for field_name, value in kwargs.items():
             if field_name in self._fields:
                 self._data[field_name] = value

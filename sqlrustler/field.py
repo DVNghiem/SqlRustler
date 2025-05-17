@@ -3,8 +3,9 @@ import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Union
+from .F import F
 
-from sqlrustler.exceptions import DBFieldValidationError
+from sqlrustler.exceptions import DBFieldValidationError, DoesNotExist
 
 
 class TypeMapper(ABC):
@@ -108,11 +109,10 @@ class Field:
         self.index = index
         self.validators = validators or []
         self.name = None
-        self.model = None
         self.auto_increment = auto_increment
         self.base_field = base_field
         self.to_model = to_model
-        self.name: Optional[str] = None
+        self.owner = None
 
     def validate(self, value: Any) -> None:
         """Template method for validation."""
@@ -142,33 +142,23 @@ class Field:
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
             return self
-        # Check if related instance is cached
-        if self.to_model and self.name in instance._related_data:
-            return instance._related_data[self.name]
-        # Return raw foreign key value if no related data
-        value = instance._data.get(self.name)
-        if self.to_model and value is not None:
-            # Dynamically fetch related instance if not preloaded
-            try:
-                related_instance = self.to_model.objects(instance.__alias__).get(id=value)
-                instance._related_data[self.name] = related_instance
-                return related_instance
-            except self.to_model.DoesNotExist:
-                instance._related_data[self.name] = None
-                return None
-        return value
+        return instance._data.get(self.name)
 
     def __set__(self, instance: Any, value: Any) -> None:
         if self.name not in instance._data:
             raise AttributeError(f"Cannot set undeclared field {self.name}")
-        if self.to_model and isinstance(value, self.to_model):
-            instance._data[self.name] = value._data.get("id")
-            instance._related_data[self.name] = value
-        else:
-            instance._data[self.name] = value
-            if self.name in instance._related_data:
-                del instance._related_data[self.name]
+        instance._data[self.name] = value
 
+    def __eq__(self, other: Any) -> Any:
+        if self.name and self.owner:
+            self_table = self.owner.table_name()
+            if isinstance(other, Field) and other.name and other.owner:
+                other_table = other.owner.table_name()
+                return F(f"{self_table}.{self.name} = {other_table}.{other.name}")
+            else:
+                # Handle comparison with literal values (e.g., int, str)
+                return F(f"{self_table}.{self.name} = %s", [other])
+        return False
 
 class CharField(Field):
     def __init__(self, max_length: int = 255, **kwargs):
@@ -317,21 +307,12 @@ class ForeignKeyField(Field):
         self,
         to_model: Union[str, Any],
         related_field: str = "id",
+        field_type: str = "int",
         on_delete: str = "CASCADE",
         on_update: str = "CASCADE",
         related_name: Optional[str] = None,
         **kwargs,
     ):
-        if isinstance(to_model, str):
-            field_type = "int"
-        else:
-            related_field_obj = getattr(to_model, related_field, None)
-            if related_field_obj is None:
-                raise ValueError(
-                    f"Field {related_field} not found in model {to_model.table_name()}"
-                )
-            field_type = related_field_obj.field_type
-
         super().__init__(field_type=field_type, **kwargs)
         self.to_model = to_model
         self.related_field = related_field
@@ -355,10 +336,49 @@ class ForeignKeyField(Field):
             raise ValueError(
                 "Field must be nullable to use SET NULL referential action"
             )
+        
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        if self.name in instance._related_data:
+            return instance._related_data.get(self.name)
+        fk_value = instance._data.get(self.name)
+        if fk_value is None:
+            return None
+        # Fetch the related model instance
+        related_model = self.to_model if not isinstance(self.to_model, str) else self.owner._fields[self.name].to_model
+        try:
+            related_instance = related_model.objects().where(**{self.related_field: fk_value}).get()
+            instance._related_data[self.name] = related_instance
+            return related_instance
+        except DoesNotExist:
+            instance._related_data[self.name] = None
+            return None
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        if self.name not in instance._data:
+            raise AttributeError(f"Cannot set undeclared field {self.name}")
+        if isinstance(value, self.to_model):
+            instance._data[self.name] = value._data.get(self.related_field)
+            instance._related_data[self.name] = value
+        else:
+            instance._data[self.name] = value
+            if self.name in instance._related_data:
+                del instance._related_data[self.name]
+
+    def __eq__(self, other: Any) -> Any:
+        if self.name and self.owner:
+            self_table = self.owner.table_name()
+            if isinstance(other, Field) and other.name:
+                other_table = self.to_model.table_name()
+                return F(f"{self_table}.{self.name} = {other_table}.{other.name}")
+            else:
+                return F(f"{self_table}.{self.name} = %s", [other])
+        return False
 
     def _validate_type(self, value: Any) -> None:
         if isinstance(self.to_model, str):
-            return  # Defer validation for string-based models
+            return
         related_field_obj = getattr(self.to_model, self.related_field)
         try:
             related_field_obj.validate(value)
