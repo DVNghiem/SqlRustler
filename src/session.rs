@@ -1,28 +1,63 @@
-use uuid::Uuid;
 use pyo3::prelude::*;
+use uuid::Uuid;
+use dashmap::DashMap;
+use lazy_static::lazy_static;
 
-use crate::{context::get_sql_connect, transaction::DatabaseTransaction};
+use crate::{
+    connection::{get_connection, get_runtime},
+    transaction::{Transaction, TransactionWrapper},
+    error::DatabaseError,
+};
+
+lazy_static! {
+    pub static ref SESSION_MAP: DashMap<String, Transaction> = DashMap::new();
+}
 
 #[pyclass]
-pub struct Session{
-    context_id: String
+pub struct Session {
+    context_id: String,
 }
 
 #[pymethods]
 impl Session {
-
     #[new]
-    pub fn new(context_id: String) -> Self {
-        Self { context_id }
+    pub fn new(context_id: Option<String>) -> Self {
+        let context_id = context_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        Session { context_id }
     }
 
-    pub fn __enter__(&self) -> DatabaseTransaction {
-        // get connection
-        todo!()
+    #[getter]
+    pub fn context_id(&self) -> String {
+        self.context_id.clone()
     }
 
-    pub fn __exit__(&self) -> DatabaseTransaction {
-        // return connection to pool
-        todo!()
+    pub fn __enter__(&self, py: Python) -> PyResult<TransactionWrapper> {
+        let connection = get_connection()?;
+        let tx = py.allow_threads(|| {
+            get_runtime().block_on(async { connection.begin_transaction().await })
+        })?;
+        SESSION_MAP.insert(self.context_id.clone(), tx);
+        Ok(TransactionWrapper::new(self.context_id.clone()))
+    }
+
+    pub fn __exit__(
+        &self,
+        _exc_type: Option<PyObject>,
+        exc_val: Option<PyObject>,
+        _exc_tb: Option<PyObject>,
+        py: Python,
+    ) -> PyResult<()> {
+        if let Some(tx) = SESSION_MAP.remove(&self.context_id) {
+            py.allow_threads(|| {
+                get_runtime().block_on(async {
+                    if exc_val.is_some() {
+                        tx.1.rollback().await
+                    } else {
+                        tx.1.commit().await
+                    }
+                })
+            })?;
+        }
+        Ok(())
     }
 }

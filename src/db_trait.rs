@@ -1,63 +1,78 @@
-use std::sync::Arc;
-
 use pyo3::prelude::*;
 use sqlx::Database;
-use tokio::sync::Mutex;
+use crate::transaction::Transaction;
 
-// Trait for dynamic parameter binding
-pub trait DynamicParameterBinder {
+// Trait for binding parameters
+pub trait ParameterBinder {
     type Arguments;
     type Database: Database;
-    type Row;
 
-    fn bind_parameters<'q>(
+    fn bind_parameters<'a>(
         &self,
-        query: &'q str,
-        params: Vec<&PyAny>,
-    ) -> Result<sqlx::query::Query<'q, Self::Database, Self::Arguments>, PyErr>;
-
-    fn bind_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr>;
+        query: &'a str,
+        params: &'a [&'a PyAny],
+    ) -> Result<sqlx::query::Query<'a, Self::Database, Self::Arguments>, PyErr>;
 }
 
-// Base trait for database operations with dynamic parameters
-pub trait DatabaseOperations {
+// Trait for mapping query results to Python objects
+pub trait ResultMapper {
+    type Row;
+    type Database: Database;
+
+    fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr>;
+}
+
+// Trait for executing queries (INSERT, UPDATE, DELETE)
+pub trait DatabaseExecutor {
+    type Database: Database;
+    type Arguments;
+    type ParameterBinder: ParameterBinder<Arguments = Self::Arguments, Database = Self::Database>;
+
+    async fn execute<'a>(
+        &self,
+        transaction: &mut Transaction,
+        query: &'a str,
+        params: &'a [&'a PyAny],
+    ) -> Result<u64, PyErr>;
+}
+
+// Trait for fetching data (SELECT)
+pub trait DatabaseFetcher {
+    type Database: Database;
     type Row;
     type Arguments;
-    type DatabaseType: Database;
-    type ParameterBinder: DynamicParameterBinder<
-        Arguments = Self::Arguments,
-        Database = Self::DatabaseType,
-    >;
+    type ParameterBinder: ParameterBinder<Arguments = Self::Arguments, Database = Self::Database>;
+    type ResultMapper: ResultMapper<Row = Self::Row, Database = Self::Database>;
 
-    async fn execute(
-        &mut self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
-        query: &str,
-        params: Vec<&PyAny>,
-    ) -> Result<u64, PyErr>;
-
-    async fn fetch_all(
-        &mut self,
+    async fn fetch_all<'a>(
+        &self,
         py: Python<'_>,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
-        query: &str,
-        params: Vec<&PyAny>,
+        transaction: &mut Transaction,
+        query: &'a str,
+        params: &'a [&'a PyAny],
     ) -> Result<Vec<PyObject>, PyErr>;
 
-    async fn stream_data(
-        &mut self,
+    async fn stream_data<'a>(
+        &self,
         py: Python<'_>,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
-        query: &str,
-        params: Vec<&PyAny>,
+        transaction: &mut Transaction,
+        query: &'a str,
+        params: &'a [&'a PyAny],
         chunk_size: usize,
-    ) -> PyResult<Vec<Vec<PyObject>>>;
+    ) -> Result<Vec<Vec<PyObject>>, PyErr>;
+}
 
-    async fn bulk_change(
-        &mut self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
-        query: &str,
-        params: Vec<Vec<&PyAny>>,
+// Trait for bulk operations
+pub trait DatabaseBulkUpdater {
+    type Database: Database;
+    type Arguments;
+    type ParameterBinder: ParameterBinder<Arguments = Self::Arguments, Database = Self::Database>;
+
+    async fn bulk_change<'a>(
+        &self,
+        transaction: &mut Transaction,
+        query: &'a str,
+        params: &'a [Vec<&'a PyAny>],
         batch_size: usize,
     ) -> Result<u64, PyErr>;
 }

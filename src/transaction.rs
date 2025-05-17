@@ -1,240 +1,174 @@
 use pyo3::prelude::*;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::error;
+use pyo3::types::PyAny;
+use sqlx::{Postgres, MySql, Sqlite};
 
-use crate::context::get_sql_connect;
+use crate::db_operations::Database;
+use crate::db_trait::{DatabaseExecutor, DatabaseFetcher, DatabaseBulkUpdater};
+use crate::error::DatabaseError;
+use crate::session::SESSION_MAP;
 
-use super::{
-    db_trait::DatabaseOperations, mysql::MySqlDatabase, postgresql::PostgresDatabase,
-    sqlite::SqliteDatabase,
-};
+pub enum Transaction {
+    Postgres(sqlx::Transaction<'static, Postgres>),
+    MySql(sqlx::Transaction<'static, MySql>),
+    Sqlite(sqlx::Transaction<'static, Sqlite>),
+}
 
-#[derive(Debug, Clone)]
-pub enum DatabaseTransactionType {
-    Postgres(
-        PostgresDatabase,
-        Arc<Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>>,
-    ),
-    MySql(
-        MySqlDatabase,
-        Arc<Mutex<Option<sqlx::Transaction<'static, sqlx::MySql>>>>,
-    ),
-    SQLite(
-        SqliteDatabase,
-        Arc<Mutex<Option<sqlx::Transaction<'static, sqlx::Sqlite>>>>,
-    ),
+impl Transaction {
+    pub async fn commit(self) -> Result<(), DatabaseError> {
+        match self {
+            Transaction::Postgres(tx) => tx.commit().await?,
+            Transaction::MySql(tx) => tx.commit().await?,
+            Transaction::Sqlite(tx) => tx.commit().await?,
+        }
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
+        match self {
+            Transaction::Postgres(tx) => tx.rollback().await?,
+            Transaction::MySql(tx) => tx.rollback().await?,
+            Transaction::Sqlite(tx) => tx.rollback().await?,
+        }
+        Ok(())
+    }
 }
 
 #[pyclass]
-#[derive(Clone, Debug)]
-pub struct DatabaseTransaction {
-    transaction: DatabaseTransactionType,
-    do_commit: bool,
+pub struct TransactionWrapper {
+    session_id: String,
 }
 
-impl DatabaseTransaction {
-    pub fn from_transaction(transaction: DatabaseTransactionType) -> Self {
-        Self {
-            transaction,
-            do_commit: false,
-        }
+impl TransactionWrapper {
+    pub fn new(session_id: String) -> Self {
+        TransactionWrapper { session_id }
     }
 
-    async fn renew_transaction<T>(
-        &self,
-        mut guard: tokio::sync::MutexGuard<'_, Option<sqlx::Transaction<'_, T>>>,
-    ) where
-        T: sqlx::Database,
-    {
-        match get_sql_connect() {
-            Some(connection) => {
-                let transaction = connection.begin_transaction().await;
-                let tx = transaction
-                    .unwrap()
-                    .downcast::<sqlx::Transaction<'static, T>>()
-                    .unwrap();
-                guard.replace(*tx);
-            }
-            None => {}
-        }
-    }
-
-    async fn commit_with_type<T>(
-        &mut self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, T>>>>,
-    ) where
-        T: sqlx::Database,
-    {
-        let mut guard = transaction.lock().await;
-        let transaction = guard.take().unwrap();
-        transaction.commit().await.ok();
-
-        self.renew_transaction(guard).await;
-    }
-
-    pub async fn commit_internal(&mut self) {
-        match self.transaction.clone() {
-            DatabaseTransactionType::Postgres(_, transaction) => {
-                self.commit_with_type(transaction).await
-            }
-            DatabaseTransactionType::MySql(_, transaction) => {
-                self.commit_with_type(transaction).await
-            }
-            DatabaseTransactionType::SQLite(_, transaction) => {
-                self.commit_with_type(transaction).await
-            }
-        }
-    }
-
-    async fn rollback_with_type<T>(
-        &self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, T>>>>,
-    ) where
-        T: sqlx::Database,
-    {
-        let mut guard = transaction.lock().await;
-        let transaction = guard.take().unwrap();
-        transaction.rollback().await.ok();
-        self.renew_transaction(guard).await;
-    }
-
-    async fn rollback_internal(&mut self) {
-        if !self.do_commit {
-            return;
-        }
-        match self.transaction.clone() {
-            DatabaseTransactionType::Postgres(_, transaction) => {
-                self.rollback_with_type(transaction).await
-            }
-            DatabaseTransactionType::MySql(_, transaction) => {
-                self.rollback_with_type(transaction).await
-            }
-            DatabaseTransactionType::SQLite(_, transaction) => {
-                self.rollback_with_type(transaction).await
-            }
-        }
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 }
 
 #[pymethods]
-impl DatabaseTransaction {
-    fn execute(&self, query: &str, params: Vec<&PyAny>) -> PyResult<u64> {
-        let transaction = self.transaction.clone();
+impl TransactionWrapper {
+    pub fn execute(&self, query: &str, params: Vec<&PyAny>) -> PyResult<u64> {
+        let db = Database::new();
+        // Convert &PyAny to PyObject before entering allow_threads
         let result = futures::executor::block_on(async move {
-            match transaction {
-                DatabaseTransactionType::Postgres(mut db, transaction) => {
-                    db.execute(transaction, query, params).await
-                }
-                DatabaseTransactionType::MySql(mut db, transaction) => {
-                    db.execute(transaction, query, params).await
-                }
-                DatabaseTransactionType::SQLite(mut db, transaction) => {
-                    db.execute(transaction, query, params).await
-                }
-            }
+           let tx_entry = SESSION_MAP
+                    .remove(&self.session_id)
+                    .ok_or(DatabaseError::TransactionNotFound)?;
+                let mut tx = tx_entry.1;
+                // Convert PyObject back to &PyAny inside the GIL scope
+                let result = match &mut tx {
+                    Transaction::Postgres(_) => {
+                        db.postgres_executor.execute(&mut tx, query, &params).await
+                    }
+                    Transaction::MySql(_) => {
+                        db.mysql_executor.execute(&mut tx, query, &params).await
+                    }
+                    Transaction::Sqlite(_) => {
+                        db.sqlite_executor.execute(&mut tx, query, &params).await
+                    }
+                };
+                SESSION_MAP.insert(self.session_id.clone(), tx);
+                result
         })?;
         Ok(result)
     }
 
-    fn fetch_all(
-        &self,
-        py: Python<'_>,
-        query: &str,
-        params: Vec<&PyAny>,
-    ) -> Result<Vec<PyObject>, PyErr> {
+    pub fn fetch_all(&self, query: &str, params: Vec<&PyAny>, py: Python) -> PyResult<Vec<PyObject>> {
+        let db = Database::new();
         let result = futures::executor::block_on(async move {
-            match self.transaction.clone() {
-                DatabaseTransactionType::Postgres(mut db, transaction) => {
-                    db.fetch_all(py, transaction, query, params).await
-                }
-                DatabaseTransactionType::MySql(mut db, transaction) => {
-                    db.fetch_all(py, transaction, query, params).await
-                }
-                DatabaseTransactionType::SQLite(mut db, transaction) => {
-                    db.fetch_all(py, transaction, query, params).await
-                }
-            }
+            let tx_entry = SESSION_MAP
+                    .remove(&self.session_id)
+                    .ok_or(DatabaseError::TransactionNotFound)?;
+                let mut tx = tx_entry.1;
+                let result = match &mut tx {
+                    Transaction::Postgres(_) => {
+                        db.postgres_fetcher.fetch_all(py, &mut tx, query, &params).await
+                    }
+                    Transaction::MySql(_) => {
+                        db.mysql_fetcher.fetch_all(py, &mut tx, query, &params).await
+                    }
+                    Transaction::Sqlite(_) => {
+                        db.sqlite_fetcher.fetch_all(py, &mut tx, query, &params).await
+                    }
+                };
+                SESSION_MAP.insert(self.session_id.clone(), tx);
+                result
         })?;
-
         Ok(result)
     }
 
-    fn stream_data(
+    pub fn stream_data(
         &self,
-        py: Python<'_>,
         query: &str,
         params: Vec<&PyAny>,
         chunk_size: usize,
+        py: Python,
     ) -> PyResult<Vec<Vec<PyObject>>> {
+        let db = Database::new();
         let result = futures::executor::block_on(async move {
-            match self.transaction.clone() {
-                DatabaseTransactionType::Postgres(mut db, transaction) => {
-                    db.stream_data(py, transaction, query, params, chunk_size)
-                        .await
-                }
-                DatabaseTransactionType::MySql(mut db, transaction) => {
-                    db.stream_data(py, transaction, query, params, chunk_size)
-                        .await
-                }
-                DatabaseTransactionType::SQLite(mut db, transaction) => {
-                    db.stream_data(py, transaction, query, params, chunk_size)
-                        .await
-                }
-            }
+           let tx_entry = SESSION_MAP
+                    .remove(&self.session_id)
+                    .ok_or(DatabaseError::TransactionNotFound)?;
+                let mut tx = tx_entry.1;
+                let result = match &mut tx {
+                    Transaction::Postgres(_) => {
+                        db.postgres_fetcher
+                            .stream_data(py, &mut tx, query, &params, chunk_size)
+                            .await
+                    }
+                    Transaction::MySql(_) => {
+                        db.mysql_fetcher
+                            .stream_data(py, &mut tx, query, &params, chunk_size)
+                            .await
+                    }
+                    Transaction::Sqlite(_) => {
+                        db.sqlite_fetcher
+                            .stream_data(py, &mut tx, query, &params, chunk_size)
+                            .await
+                    }
+                };
+                SESSION_MAP.insert(self.session_id.clone(), tx);
+                result
         })?;
-
         Ok(result)
     }
 
-    fn bulk_change(
-        &mut self,
+    pub fn bulk_change(
+        &self,
         query: &str,
         params: Vec<Vec<&PyAny>>,
         batch_size: usize,
     ) -> PyResult<u64> {
-        let transaction = self.transaction.clone();
+        let db = Database::new();
+
         let result = futures::executor::block_on(async move {
-            let row_effect = match transaction {
-                DatabaseTransactionType::Postgres(mut db, transaction) => {
-                    db.bulk_change(transaction, query, params, batch_size).await
-                }
-                DatabaseTransactionType::MySql(mut db, transaction) => {
-                    db.bulk_change(transaction, query, params, batch_size).await
-                }
-                DatabaseTransactionType::SQLite(mut db, transaction) => {
-                    db.bulk_change(transaction, query, params, batch_size).await
-                }
-            };
-            Ok(match row_effect {
-                Ok(row) => {
-                    self.do_commit = true;
-                    row
-                }
-                Err(e) => {
-                    self.rollback_internal().await;
-                    error!("Error in bulk_change: {:?}", e);
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        e.to_string(),
-                    ));
-                }
-            })
+            let tx_entry = SESSION_MAP
+                    .remove(&self.session_id)
+                    .ok_or(DatabaseError::TransactionNotFound)?;
+                let mut tx = tx_entry.1;
+                let result = match &mut tx {
+                    Transaction::Postgres(_) => {
+                        db.postgres_bulk_updater
+                            .bulk_change(&mut tx, query, &params, batch_size)
+                            .await
+                    }
+                    Transaction::MySql(_) => {
+                        db.mysql_bulk_updater
+                            .bulk_change(&mut tx, query, &params, batch_size)
+                            .await
+                    }
+                    Transaction::Sqlite(_) => {
+                        db.sqlite_bulk_updater
+                            .bulk_change(&mut tx, query, &params, batch_size)
+                            .await
+                    }
+                };
+                SESSION_MAP.insert(self.session_id.clone(), tx);
+                result
         })?;
-
         Ok(result)
-    }
-
-    fn commit(&mut self) -> PyResult<()> {
-        let _ = futures::executor::block_on(async move {
-            self.commit_internal().await;
-        });
-        Ok(())
-    }
-
-    fn rollback(&mut self) -> PyResult<()> {
-        let _ = futures::executor::block_on(async move {
-            self.rollback_internal().await;
-        });
-        Ok(())
     }
 }

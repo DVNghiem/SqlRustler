@@ -1,119 +1,73 @@
+use pyo3::prelude::*;
+use once_cell::sync::OnceCell;
+use tokio::runtime::Runtime;
 use std::sync::Arc;
 
-use crate::context::{get_runtime, set_sql_connect};
-
-use super::{
-    config::DatabaseConfig,
-    postgresql::PostgresDatabase,
-    mysql::MySqlDatabase,
-    sqlite::SqliteDatabase,
-    transaction::{DatabaseTransaction, DatabaseTransactionType},
+use crate::{
+    config::{DatabaseConfig, DatabasePool},
+    error::DatabaseError,
+    transaction::Transaction,
 };
-use pyo3::prelude::*;
-use sqlx::{Error as SqlxError, Pool};
-use sqlx::{MySql, Postgres, Sqlite};
-use tokio::sync::Mutex;
 
-#[derive(Clone)]
-enum DatabaseType {
-    Postgres(Arc<Pool<sqlx::Postgres>>),
-    MySql(Arc<Pool<sqlx::MySql>>),
-    Sqlite(Arc<Pool<sqlx::Sqlite>>),
+static RUNTIME: OnceCell<Runtime> = OnceCell::new();
+static CONNECTION: OnceCell<Arc<Connection>> = OnceCell::new();
+
+pub fn get_runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| Runtime::new().unwrap())
 }
 
 #[derive(Clone)]
-pub struct __Connection {
-    connection: DatabaseType,
+pub struct Connection {
+    pool: DatabasePool,
 }
 
-impl __Connection {
-    pub async fn new(config: DatabaseConfig) -> Self {
-        let connection = match config.driver {
-            super::config::DatabaseType::Postgres => {
-                let pool = config.create_postgres_pool().await.unwrap();
-                Ok::<DatabaseType, SqlxError>(DatabaseType::Postgres(Arc::new(pool)))
-            }
-            super::config::DatabaseType::Mysql => {
-                let pool = config.create_mysql_pool().await.unwrap();
-                Ok::<DatabaseType, SqlxError>(DatabaseType::MySql(Arc::new(pool)))
-            }
-            super::config::DatabaseType::Sqlite => {
-                let pool = config.create_sqlite_pool().await.unwrap();
-                Ok::<DatabaseType, SqlxError>(DatabaseType::Sqlite(Arc::new(pool)))
-            }
-        }
-        .unwrap();
-
-        Self { connection }
+impl Connection {
+    pub async fn new(config: DatabaseConfig) -> Result<Self, DatabaseError> {
+        let pool = config.create_pool().await?;
+        Ok(Connection { pool })
     }
 
-    // get transaction
-    pub async fn transaction(&self) -> DatabaseTransaction {
-        match &self.connection {
-            DatabaseType::Postgres(pool) => {
-                let transaction = pool
-                    .begin()
-                    .await
-                    .map_err(|e| SqlxError::Configuration(e.to_string().into()));
-                DatabaseTransaction::from_transaction(DatabaseTransactionType::Postgres(
-                    PostgresDatabase,
-                    Arc::new(Mutex::new(Some(transaction.unwrap()))),
-                ))
+    pub async fn begin_transaction(&self) -> Result<Transaction, DatabaseError> {
+        match &self.pool {
+            DatabasePool::Postgres(pool) => {
+                let tx = pool.begin().await?;
+                Ok(Transaction::Postgres(tx))
             }
-            DatabaseType::MySql(pool) => {
-                let transaction = pool
-                    .begin()
-                    .await
-                    .map_err(|e| SqlxError::Configuration(e.to_string().into()));
-                DatabaseTransaction::from_transaction(DatabaseTransactionType::MySql(
-                    MySqlDatabase,
-                    Arc::new(Mutex::new(Some(transaction.unwrap()))),
-                ))
+            DatabasePool::MySql(pool) => {
+                let tx = pool.begin().await?;
+                Ok(Transaction::MySql(tx))
             }
-            DatabaseType::Sqlite(pool) => {
-                let transaction = pool
-                    .begin()
-                    .await
-                    .map_err(|e| SqlxError::Configuration(e.to_string().into()));
-                DatabaseTransaction::from_transaction(DatabaseTransactionType::SQLite(
-                    SqliteDatabase,
-                    Arc::new(Mutex::new(Some(transaction.unwrap()))),
-                ))
-            }
-        }
-    }
-
-    pub async fn begin_transaction(&self) -> Option<Box<dyn std::any::Any + Send>> {
-
-        match &self.connection {
-            DatabaseType::Postgres(pool) => {
-                let transaction: sqlx::Transaction<Postgres> = pool.begin().await.ok()?;
-                Some(Box::new(transaction))
-            }
-            DatabaseType::MySql(pool) => {
-                let transaction: sqlx::Transaction<MySql> = pool.begin().await.ok()?;
-                Some(Box::new(transaction))
-            }
-            DatabaseType::Sqlite(pool) => {
-                let transaction: sqlx::Transaction<Sqlite> = pool.begin().await.ok()?;
-                Some(Box::new(transaction))
+            DatabasePool::Sqlite(pool) => {
+                let tx = pool.begin().await?;
+                Ok(Transaction::Sqlite(tx))
             }
         }
     }
 }
 
-#[derive(Clone)]
+pub fn get_connection() -> Result<&'static Arc<Connection>, DatabaseError> {
+    CONNECTION
+        .get()
+        .ok_or(DatabaseError::NotConnected)
+}
+
+pub fn set_connection(connection: Connection) -> Result<(), DatabaseError> {
+    CONNECTION
+        .set(Arc::new(connection))
+        .map_err(|_| DatabaseError::Configuration("Connection already set".into()))
+}
+
 #[pyclass]
 pub struct DatabaseConnection;
 
 #[pymethods]
 impl DatabaseConnection {
-
     #[staticmethod]
-    pub fn connect(config: DatabaseConfig) {
-        get_runtime().block_on(async move {
-            let database = __Connection::new(config).await;
-            set_sql_connect(database);
-        });
+    pub fn connect(config: DatabaseConfig, py: Python) -> PyResult<()> {
+        let connection = py.allow_threads(|| {
+            get_runtime().block_on(async { Connection::new(config).await })
+        })?;
+        set_connection(connection)?;
+        Ok(())
     }
 }

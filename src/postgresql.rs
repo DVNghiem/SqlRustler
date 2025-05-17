@@ -1,272 +1,212 @@
-use std::sync::Arc;
-
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
-use futures::StreamExt;
-use pyo3::{
-    prelude::*,
-    types::{
-        PyBool, PyDate, PyDateAccess, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
-        PyTimeAccess,
-    },
+use futures::TryStreamExt;
+use pyo3::{prelude::*, types::{PyDict, PyList}};
+use sqlx::{Postgres, Row};
+use serde_json::Value as JsonValue;
+use crate::{
+    db_trait::{ParameterBinder, ResultMapper, DatabaseExecutor, DatabaseFetcher, DatabaseBulkUpdater},
+    transaction::Transaction,
+    error::DatabaseError,
 };
-use serde_json::{from_str, to_string};
-use sqlx::{
-    postgres::{PgArguments, PgQueryResult, PgRow},
-    types::{Json, JsonValue},
-    Column, Row, ValueRef,
-};
-use tokio::sync::Mutex;
 
-use super::db_trait::{DatabaseOperations, DynamicParameterBinder};
+// Postgres Implementation
+pub struct PostgresBinder;
 
-pub struct PostgresParameterBinder;
+impl ParameterBinder for PostgresBinder {
+    type Arguments = sqlx::postgres::PgArguments;
+    type Database = Postgres;
 
-impl DynamicParameterBinder for PostgresParameterBinder {
-    type Arguments = PgArguments;
-    type Database = sqlx::Postgres;
-    type Row = PgRow;
-
-    fn bind_parameters<'q>(
+    fn bind_parameters(
         &self,
-        query: &'q str,
-        params: Vec<&PyAny>,
-    ) -> Result<sqlx::query::Query<'q, Self::Database, PgArguments>, PyErr> {
-        let mut query_builder = sqlx::query(query);
-
+        query: &str,
+        params: &[&PyAny],
+    ) -> Result<sqlx::query::Query<Self::Database, Self::Arguments>, PyErr> {
+        let mut q = sqlx::query(query);
         for param in params {
-            query_builder = match param {
-                p if p.is_none() => query_builder.bind(None::<String>),
-                p if p.is_instance_of::<PyString>() => query_builder.bind(p.extract::<String>()?),
-                p if p.is_instance_of::<PyInt>() => query_builder.bind(p.extract::<i64>()?),
-                p if p.is_instance_of::<PyFloat>() => query_builder.bind(p.extract::<f64>()?),
-                p if p.is_instance_of::<PyBool>() => query_builder.bind(p.extract::<bool>()?),
-                p if p.is_instance_of::<PyDateTime>() => query_builder.bind(extract_datetime(p)?),
-                p if p.is_instance_of::<PyDate>() => query_builder.bind(extract_date(p)?),
-                p if p.is_instance_of::<PyTime>() => query_builder.bind(extract_time(p)?),
-                p if p.is_instance_of::<PyDict>() || p.is_instance_of::<PyList>() => {
-                    let json_value = from_str(&p.to_string()).unwrap_or(JsonValue::Null);
-                    query_builder.bind(Json(json_value))
-                }
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                        "Unsupported parameter type: {:?}",
-                        param.get_type()
-                    )))
-                }
-            };
+            if param.is_none() {
+                q = q.bind(None::<i32>);
+            } else if let Ok(val) = param.extract::<i64>() {
+                q = q.bind(val);
+            } else if let Ok(val) = param.extract::<f64>() {
+                q = q.bind(val);
+            } else if let Ok(val) = param.extract::<&str>() {
+                q = q.bind(val);
+            } else if let Ok(val) = param.extract::<bool>() {
+                q = q.bind(val);
+            } else if let Ok(list) = param.downcast::<PyList>() {
+                let vec: Vec<String> = list.extract()?;
+                q = q.bind(vec);
+            } else if let Ok(json) = param.to_string().parse::<JsonValue>() {
+                q = q.bind(json);
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    format!("Unsupported parameter type: {}", param.get_type().name()?)
+                ));
+            }
         }
-        Ok(query_builder)
-    }
-
-    fn bind_result(&self, py: Python<'_>, row: &PgRow) -> Result<PyObject, PyErr> {
-        let dict = PyDict::new(py);
-
-        for (i, column) in row.columns().iter().enumerate() {
-            let name = column.name();
-            let value = match row.try_get_raw(i) {
-                Ok(val) if val.is_null() => py.None(),
-                Ok(_) => extract_column_value(py, row, i)?,
-                Err(_) => py.None(),
-            };
-            dict.set_item(name, value)?;
-        }
-        Ok(dict.into())
+        Ok(q)
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PostgresDatabase;
+pub struct PostgresMapper;
 
-impl DatabaseOperations for PostgresDatabase {
-    type Row = PgRow;
-    type Arguments = PgArguments;
-    type DatabaseType = sqlx::Postgres;
-    type ParameterBinder = PostgresParameterBinder;
+impl ResultMapper for PostgresMapper {
+    type Row = sqlx::postgres::PgRow;
+    type Database = Postgres;
+
+    fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr> {
+        let dict = PyDict::new(py);
+        for (i, col) in row.columns().iter().enumerate() {
+            let key = col.name();
+            let value: PyObject = match row.try_get::<Option<i64>, _>(i) {
+                Ok(Some(val)) => Ok(val.to_object(py)),
+                Ok(None) => Ok(py.None()),
+                Err(_) => match row.try_get::<Option<f64>, _>(i) {
+                    Ok(Some(val)) => Ok(val.to_object(py)),
+                    Ok(None) => Ok(py.None()),
+                    Err(_) => match row.try_get::<Option<&str>, _>(i) {
+                        Ok(Some(val)) => Ok(val.to_object(py)),
+                        Ok(None) => Ok(py.None()),
+                        Err(_) => match row.try_get::<Option<bool>, _>(i) {
+                            Ok(Some(val)) => Ok(val.to_object(py)),
+                            Ok(None) => Ok(py.None()),
+                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                format!("Unsupported column type for {}", key)
+                            )),
+                        },
+                    },
+                },
+            }?;
+            dict.set_item(key, value)?;
+        }
+        Ok(dict.to_object(py))
+    }
+}
+
+pub struct PostgresExecutor;
+
+impl DatabaseExecutor for PostgresExecutor {
+    type Database = Postgres;
+    type Arguments = sqlx::postgres::PgArguments;
+    type ParameterBinder = PostgresBinder;
 
     async fn execute(
-        &mut self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
+        &self,
+        transaction: &mut Transaction,
         query: &str,
-        params: Vec<&PyAny>,
+        params: &[&PyAny],
     ) -> Result<u64, PyErr> {
-        let query_builder = PostgresParameterBinder.bind_parameters(query, params)?;
-        let mut guard = transaction.lock().await;
-        let result = query_builder
-            .execute(&mut **guard.as_mut().unwrap())
-            .await
-            .unwrap_or(PgQueryResult::default());
-        Ok(result.rows_affected())
+        let binder = PostgresBinder;
+        match transaction {
+            Transaction::Postgres(tx) => {
+                let q = binder.bind_parameters(query, params)?;
+                let result = q.execute(&mut **tx).await.map_err(DatabaseError::Sqlx)?;
+                Ok(result.rows_affected())
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction type mismatch"
+            )),
+        }
     }
+}
+
+pub struct PostgresFetcher;
+
+impl DatabaseFetcher for PostgresFetcher {
+    type Database = Postgres;
+    type Row = sqlx::postgres::PgRow;
+    type Arguments = sqlx::postgres::PgArguments;
+    type ParameterBinder = PostgresBinder;
+    type ResultMapper = PostgresMapper;
 
     async fn fetch_all(
-        &mut self,
+        &self,
         py: Python<'_>,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
+        transaction: &mut Transaction,
         query: &str,
-        params: Vec<&PyAny>,
+        params: &[&PyAny],
     ) -> Result<Vec<PyObject>, PyErr> {
-        let query_builder = PostgresParameterBinder.bind_parameters(query, params)?;
-        let mut guard = transaction.lock().await;
-        let rows = query_builder
-            .fetch_all(&mut **guard.as_mut().unwrap())
-            .await
-            .unwrap_or(Vec::new());
-        rows.iter()
-            .map(|row| PostgresParameterBinder.bind_result(py, row))
-            .collect()
+        let binder = PostgresBinder;
+        let mapper = PostgresMapper;
+        match transaction {
+            Transaction::Postgres(tx) => {
+                let q = binder.bind_parameters(query, params)?;
+                let rows = q.fetch_all(&mut **tx).await.map_err(DatabaseError::Sqlx)?;
+                let mut results = Vec::new();
+                for row in rows {
+                    results.push(mapper.map_result(py, &row)?);
+                }
+                Ok(results)
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction type mismatch"
+            )),
+        }
     }
 
     async fn stream_data(
-        &mut self,
+        &self,
         py: Python<'_>,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>>,
+        transaction: &mut Transaction,
         query: &str,
-        params: Vec<&PyAny>,
+        params: &[&PyAny],
         chunk_size: usize,
-    ) -> PyResult<Vec<Vec<PyObject>>> {
-        let query_builder = PostgresParameterBinder.bind_parameters(query, params)?;
-        let mut guard = transaction.lock().await.take().unwrap();
-        let mut stream = query_builder.fetch(&mut *guard);
-        let mut chunks: Vec<Vec<PyObject>> = Vec::new();
-        let mut current_chunk: Vec<PyObject> = Vec::new();
-
-        while let Some(row_result) = stream.next().await {
-            match row_result {
-                Ok(row) => {
-                    let row_data: PyObject = PostgresParameterBinder.bind_result(py, &row)?;
-                    current_chunk.push(row_data);
-
+    ) -> Result<Vec<Vec<PyObject>>, PyErr> {
+        let binder = PostgresBinder;
+        let mapper = PostgresMapper;
+        match transaction {
+            Transaction::Postgres(tx) => {
+                let q = binder.bind_parameters(query, params)?;
+                let mut stream = q.fetch(&mut **tx);
+                let mut chunks = Vec::new();
+                let mut current_chunk = Vec::new();
+                while let Ok(Some(row)) = stream.try_next().await {
+                    current_chunk.push(mapper.map_result(py, &row)?);
                     if current_chunk.len() >= chunk_size {
-                        chunks.push(current_chunk);
-                        current_chunk = Vec::new();
+                        chunks.push(std::mem::take(&mut current_chunk));
                     }
                 }
-                Err(e) => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        e.to_string(),
-                    ));
+                if !current_chunk.is_empty() {
+                    chunks.push(current_chunk);
                 }
+                Ok(chunks)
             }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction type mismatch"
+            )),
         }
-
-        if !current_chunk.is_empty() {
-            chunks.push(current_chunk);
-        }
-        Ok(chunks)
     }
+}
+
+pub struct PostgresBulkUpdater;
+
+impl DatabaseBulkUpdater for PostgresBulkUpdater {
+    type Database = Postgres;
+    type Arguments = sqlx::postgres::PgArguments;
+    type ParameterBinder = PostgresBinder;
 
     async fn bulk_change(
-        &mut self,
-        transaction: Arc<Mutex<Option<sqlx::Transaction<'static, Self::DatabaseType>>>>,
+        &self,
+        transaction: &mut Transaction,
         query: &str,
-        params: Vec<Vec<&PyAny>>,
+        params: &[Vec<&PyAny>],
         batch_size: usize,
     ) -> Result<u64, PyErr> {
-        let mut total_affected: u64 = 0;
-        let mut guard = transaction.lock().await;
-        let tx = guard.as_mut().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No active transaction")
-        })?;
-
-        // Process in batches
-        for chunk in params.chunks(batch_size) {
-            for param_set in chunk {
-                // Build query with current parameters
-                let query_builder =
-                    PostgresParameterBinder.bind_parameters(query, param_set.to_vec())?;
-                // Execute query and accumulate affected rows
-                let result = query_builder.execute(&mut **tx).await.map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
-                })?;
-
-                total_affected += result.rows_affected();
+        let binder = PostgresBinder;
+        match transaction {
+            Transaction::Postgres(tx) => {
+                let mut total_affected = 0;
+                for chunk in params.chunks(batch_size) {
+                    for params in chunk {
+                        let q = binder.bind_parameters(query, params)?;
+                        let result = q.execute(&mut **tx).await.map_err(DatabaseError::Sqlx)?;
+                        total_affected += result.rows_affected();
+                    }
+                }
+                Ok(total_affected)
             }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction type mismatch"
+            )),
         }
-        Ok(total_affected)
     }
-}
-
-// Helper functions
-fn extract_datetime(param: &PyAny) -> PyResult<NaiveDateTime> {
-    let dt: &PyDateTime = param.downcast()?;
-    Ok(NaiveDateTime::new(
-        NaiveDate::from_ymd_opt(dt.get_year(), dt.get_month() as u32, dt.get_day() as u32).unwrap(),
-        NaiveTime::from_hms_nano_opt(
-            dt.get_hour() as u32,
-            dt.get_minute() as u32,
-            dt.get_second() as u32,
-            dt.get_microsecond() as u32 * 1000,
-        )
-        .unwrap(),
-    ))
-}
-
-fn extract_date(param: &PyAny) -> PyResult<NaiveDate> {
-    let date: &PyDate = param.downcast()?;
-    Ok(NaiveDate::from_ymd_opt(
-        date.get_year(),
-        date.get_month() as u32,
-        date.get_day() as u32,
-    )
-    .unwrap())
-}
-
-fn extract_time(param: &PyAny) -> PyResult<NaiveTime> {
-    let time: &PyTime = param.downcast()?;
-    Ok(NaiveTime::from_hms_nano_opt(
-        time.get_hour() as u32,
-        time.get_minute() as u32,
-        time.get_second() as u32,
-        time.get_microsecond() as u32 * 1000,
-    )
-    .unwrap())
-}
-
-fn extract_column_value(py: Python<'_>, row: &PgRow, index: usize) -> PyResult<PyObject> {
-    Ok(if let Ok(v) = row.try_get::<i32, _>(index) {
-        v.into_py(py)
-    } else if let Ok(v) = row.try_get::<i64, _>(index) {
-        v.into_py(py)
-    } else if let Ok(v) = row.try_get::<String, _>(index) {
-        v.into_py(py)
-    } else if let Ok(v) = row.try_get::<f64, _>(index) {
-        v.into_py(py)
-    } else if let Ok(v) = row.try_get::<bool, _>(index) {
-        v.into_py(py)
-    } else if let Ok(v) = row.try_get::<NaiveDateTime, _>(index) {
-        PyDateTime::new(
-            py,
-            v.year(),
-            v.month() as u8,
-            v.day() as u8,
-            v.hour() as u8,
-            v.minute() as u8,
-            v.second() as u8,
-            (v.nanosecond() / 1000) as u32,
-            None,
-        )?
-        .into()
-    } else if let Ok(v) = row.try_get::<NaiveDate, _>(index) {
-        PyDate::new(py, v.year(), v.month() as u8, v.day() as u8)?.into()
-    } else if let Ok(v) = row.try_get::<NaiveTime, _>(index) {
-        PyTime::new(
-            py,
-            v.hour() as u8,
-            v.minute() as u8,
-            v.second() as u8,
-            (v.nanosecond() / 1000) as u32,
-            None,
-        )?
-        .into()
-    } else if let Ok(v) = row.try_get::<Json<JsonValue>, _>(index) {
-        to_string(&v.0)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-            .into_py(py)
-    } else if let Ok(v) = row.try_get::<Vec<String>, _>(index) {
-        PyList::new(py, &v).into()
-    } else if let Ok(v) = row.try_get::<Vec<i32>, _>(index) {
-        PyList::new(py, &v).into()
-    } else {
-        py.None()
-    })
 }

@@ -3,41 +3,49 @@ use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions},
     postgres::{PgConnectOptions, PgPoolOptions},
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    ConnectOptions, Pool,
+    Pool,
 };
-use std::collections::HashMap;
 use std::time::Duration;
-use tracing::log::LevelFilter;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[pyclass]
 pub enum DatabaseType {
     Postgres,
-    Mysql,
+    MySql,
     Sqlite,
 }
 
-impl Default for DatabaseType {
-    fn default() -> Self {
+#[pymethods]
+impl DatabaseType {
+    #[staticmethod]
+    fn postgres() -> Self {
         DatabaseType::Postgres
+    }
+
+    #[staticmethod]
+    fn mysql() -> Self {
+        DatabaseType::MySql
+    }
+
+    #[staticmethod]
+    fn sqlite() -> Self {
+        DatabaseType::Sqlite
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[pyclass]
 pub struct DatabaseConfig {
+    #[pyo3(get, set)]
     pub driver: DatabaseType,
+    #[pyo3(get, set)]
     pub url: String,
-
-    // Connection pool settings
+    #[pyo3(get, set)]
     pub max_connections: u32,
-
+    #[pyo3(get, set)]
     pub min_connections: u32,
-
+    #[pyo3(get, set)]
     pub idle_timeout: u64,
-
-    // Additional database-specific options
-    pub options: Option<HashMap<String, String>>,
 }
 
 #[pymethods]
@@ -45,100 +53,98 @@ impl DatabaseConfig {
     #[new]
     fn new(
         driver: DatabaseType,
-        url: &str,
-        max_connections: u32,
-        min_connections: u32,
-        idle_timeout: u64,
-        options: Option<HashMap<String, String>>,
+        url: String,
+        max_connections: Option<u32>,
+        min_connections: Option<u32>,
+        idle_timeout: Option<u64>,
     ) -> Self {
         DatabaseConfig {
             driver,
-            url: url.to_string(),
-            max_connections,
-            min_connections,
-            idle_timeout,
-            options,
+            url,
+            max_connections: max_connections.unwrap_or(10),
+            min_connections: min_connections.unwrap_or(1),
+            idle_timeout: idle_timeout.unwrap_or(600),
+        }
+    }
+
+    #[staticmethod]
+    fn default_postgres(url: String) -> Self {
+        DatabaseConfig {
+            driver: DatabaseType::Postgres,
+            url,
+            max_connections: 10,
+            min_connections: 1,
+            idle_timeout: 600,
+        }
+    }
+
+    #[staticmethod]
+    fn default_mysql(url: String) -> Self {
+        DatabaseConfig {
+            driver: DatabaseType::MySql,
+            url,
+            max_connections: 10,
+            min_connections: 1,
+            idle_timeout: 600,
+        }
+    }
+
+    #[staticmethod]
+    fn default_sqlite(url: String) -> Self {
+        DatabaseConfig {
+            driver: DatabaseType::Sqlite,
+            url,
+            max_connections: 10,
+            min_connections: 1,
+            idle_timeout: 600,
         }
     }
 }
 
 impl DatabaseConfig {
-    // Create PostgreSQL connection pool
-    pub async fn create_postgres_pool(&self) -> Result<Pool<sqlx::Postgres>, sqlx::Error> {
-        // Parse connection options
-
-        let mut connect_options = self.url.parse::<PgConnectOptions>()?;
-        connect_options = connect_options.log_statements(LevelFilter::Debug);
-
-        // Create pool with configured options
-        PgPoolOptions::new()
-            .max_connections(self.max_connections)
-            .min_connections(self.min_connections)
-            .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-            .acquire_timeout(Duration::from_secs(self.idle_timeout))
-            .connect_with(connect_options)
-            .await
-    }
-
-    // Create MySQL connection pool
-    pub async fn create_mysql_pool(&self) -> Result<Pool<sqlx::MySql>, sqlx::Error> {
-        let connect_options = self.url.parse::<MySqlConnectOptions>()?;
-
-        MySqlPoolOptions::new()
-            .max_connections(self.max_connections)
-            .min_connections(self.min_connections)
-            .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-            .acquire_timeout(Duration::from_secs(self.idle_timeout))
-            .connect_with(connect_options)
-            .await
-    }
-
-    // Create SQLite connection pool
-    pub async fn create_sqlite_pool(&self) -> Result<Pool<sqlx::Sqlite>, sqlx::Error> {
-        let connect_options = self.url.parse::<SqliteConnectOptions>()?;
-
-        SqlitePoolOptions::new()
-            .max_connections(self.max_connections)
-            .min_connections(self.min_connections)
-            .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-            .connect_with(connect_options)
-            .await
-    }
-
-    // Dynamic pool creation based on database type
-    pub async fn create_pool(&self) -> Result<Box<dyn DatabasePoolTrait>, sqlx::Error> {
+    pub async fn create_pool(&self) -> Result<DatabasePool, crate::error::DatabaseError> {
         match self.driver {
             DatabaseType::Postgres => {
-                let pool = self.create_postgres_pool().await?;
-                Ok(Box::new(pool))
+                let options = self
+                    .url
+                    .parse::<PgConnectOptions>()?;
+                let pool = PgPoolOptions::new()
+                    .max_connections(self.max_connections)
+                    .min_connections(self.min_connections)
+                    .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
+                    .acquire_timeout(Duration::from_secs(self.idle_timeout))
+                    .connect_with(options)
+                    .await?;
+                Ok(DatabasePool::Postgres(pool))
             }
-            DatabaseType::Mysql => {
-                let pool = self.create_mysql_pool().await?;
-                Ok(Box::new(pool))
+            DatabaseType::MySql => {
+                let options = self.url.parse::<MySqlConnectOptions>()?;
+                let pool = MySqlPoolOptions::new()
+                    .max_connections(self.max_connections)
+                    .min_connections(self.min_connections)
+                    .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
+                    .acquire_timeout(Duration::from_secs(self.idle_timeout))
+                    .connect_with(options)
+                    .await?;
+                Ok(DatabasePool::MySql(pool))
             }
             DatabaseType::Sqlite => {
-                let pool = self.create_sqlite_pool().await?;
-                Ok(Box::new(pool))
+                let options = self.url.parse::<SqliteConnectOptions>()?;
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(self.max_connections)
+                    .min_connections(self.min_connections)
+                    .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
+                    .connect_with(options)
+                    .await?;
+                Ok(DatabasePool::Sqlite(pool))
             }
-        }
-    }
-
-    // Generate default configuration
-    pub fn default_postgres(url: &str) -> Self {
-        DatabaseConfig {
-            driver: DatabaseType::Postgres,
-            url: url.to_string(),
-            max_connections: 10,
-            min_connections: 1,
-            idle_timeout: 600,
-            options: None,
         }
     }
 }
 
-// Trait for dynamic pool handling
-pub trait DatabasePoolTrait: Send + Sync {}
-
-impl DatabasePoolTrait for Pool<sqlx::Postgres> {}
-impl DatabasePoolTrait for Pool<sqlx::MySql> {}
-impl DatabasePoolTrait for Pool<sqlx::Sqlite> {}
+#[derive(Clone)]
+pub enum DatabasePool {
+    Postgres(Pool<sqlx::Postgres>),
+    MySql(Pool<sqlx::MySql>),
+    Sqlite(Pool<sqlx::Sqlite>),
+}
