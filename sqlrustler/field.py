@@ -1,16 +1,17 @@
-from abc import ABC, abstractmethod
 import json
+from abc import ABC, abstractmethod
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Union
-from .F import F
 
 from sqlrustler.exceptions import DBFieldValidationError, DoesNotExist
+
+from .F import F
 
 
 class TypeMapper(ABC):
     """Strategy for mapping Python field types to database-specific SQL types."""
-    
+
     @abstractmethod
     def get_sql_type(self, field_type: str, **kwargs) -> str:
         pass
@@ -52,9 +53,9 @@ class MySqlTypeMapper(TypeMapper):
 
 class FieldFactory:
     """Factory for creating database-specific Field instances."""
-    
+
     @staticmethod
-    def create_field(database_type: str, field_type: str, **kwargs) -> 'Field':
+    def create_field(database_type: str, field_type: str, **kwargs) -> "Field":
         field_classes = {
             "postgres": {
                 "int": IntegerField,
@@ -87,7 +88,7 @@ class FieldFactory:
 
 class Field:
     """Base field class for ORM-like field definitions."""
-    
+
     def __init__(
         self,
         field_type: str,
@@ -138,7 +139,7 @@ class Field:
 
     def sql_type(self) -> str:
         return self.type_mapper.get_sql_type(self.field_type)
-    
+
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
             return self
@@ -159,6 +160,7 @@ class Field:
                 # Handle comparison with literal values (e.g., int, str)
                 return F(f"{self_table}.{self.name} = %s", [other])
         return False
+
 
 class CharField(Field):
     def __init__(self, max_length: int = 255, **kwargs):
@@ -244,9 +246,7 @@ class JSONField(Field):
         try:
             json.dumps(value)
         except (TypeError, ValueError):
-            raise DBFieldValidationError(
-                f"Field {self.name} must be JSON serializable"
-            )
+            raise DBFieldValidationError(f"Field {self.name} must be JSON serializable")
 
 
 class ArrayField(Field):
@@ -256,14 +256,14 @@ class ArrayField(Field):
 
     def _validate_type(self, value: Any) -> None:
         if not isinstance(value, (list, tuple)):
-            raise DBFieldValidationError(
-                f"Field {self.name} must be a list or tuple"
-            )
+            raise DBFieldValidationError(f"Field {self.name} must be a list or tuple")
         for item in value:
             self.base_field.validate(item)
 
     def sql_type(self) -> str:
-        return self.type_mapper.get_sql_type(self.field_type, base_field=self.base_field)
+        return self.type_mapper.get_sql_type(
+            self.field_type, base_field=self.base_field
+        )
 
 
 class DecimalField(Field):
@@ -272,7 +272,7 @@ class DecimalField(Field):
             field_type="decimal",
             max_digits=max_digits,
             decimal_places=decimal_places,
-            **kwargs
+            **kwargs,
         )
         self.max_digits = max_digits
         self.decimal_places = decimal_places
@@ -298,7 +298,7 @@ class DecimalField(Field):
         return self.type_mapper.get_sql_type(
             self.field_type,
             max_digits=self.max_digits,
-            decimal_places=self.decimal_places
+            decimal_places=self.decimal_places,
         )
 
 
@@ -336,7 +336,7 @@ class ForeignKeyField(Field):
             raise ValueError(
                 "Field must be nullable to use SET NULL referential action"
             )
-        
+
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
             return self
@@ -346,9 +346,15 @@ class ForeignKeyField(Field):
         if fk_value is None:
             return None
         # Fetch the related model instance
-        related_model = self.to_model if not isinstance(self.to_model, str) else self.owner._fields[self.name].to_model
+        related_model = (
+            self.to_model
+            if not isinstance(self.to_model, str)
+            else self.owner._fields[self.name].to_model
+        )
         try:
-            related_instance = related_model.objects().where(**{self.related_field: fk_value}).get()
+            related_instance = (
+                related_model.objects().where(**{self.related_field: fk_value}).get()
+            )
             instance._related_data[self.name] = related_instance
             return related_instance
         except DoesNotExist:

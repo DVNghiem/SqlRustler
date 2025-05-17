@@ -1,7 +1,6 @@
 from enum import Enum
 
 
-
 class JoinType(Enum):
     INNER = "INNER JOIN"
     LEFT = "LEFT JOIN"

@@ -1,5 +1,7 @@
+from typing import Any, List
+
 from .express import Expression
-from typing import List, Any
+
 
 class F:
     def __init__(self, field: str, params: List[Any] = None):

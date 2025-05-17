@@ -1,9 +1,9 @@
 import re
 from datetime import date, datetime
-from typing import Optional, Any
+from typing import Any, Optional
 
 from .field import Field, ForeignKeyField
-from .query import QuerySet
+from .queryset import QuerySet
 from .sqlrustler import Session
 
 
@@ -41,11 +41,6 @@ class Model(metaclass=MetaModel):
     _alias = "default"
     _abstract = True
 
-    @classmethod
-    def get_session(cls, alias: Optional[str] = None) -> Session:
-        """Get a session for query execution."""
-        return Session(alias=alias or cls._alias)
-    
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         cls._fields = {}
@@ -62,7 +57,9 @@ class Model(metaclass=MetaModel):
             if field_name in self._fields:
                 self._data[field_name] = value
             else:
-                raise ValueError(f"Unknown field {field_name} for {self.__class__.__name__}")
+                raise ValueError(
+                    f"Unknown field {field_name} for {self.__class__.__name__}"
+                )
 
     @classmethod
     def objects(cls, alias: Optional[str] = None) -> QuerySet:
@@ -71,6 +68,11 @@ class Model(metaclass=MetaModel):
     @classmethod
     def table_name(cls) -> str:
         return cls._table_name
+
+    @classmethod
+    def get_session(cls, alias: Optional[str] = None) -> Session:
+        """Get a session for query execution."""
+        return Session(alias=alias or cls._alias)
 
     @classmethod
     def create_table_sql(cls) -> str:
@@ -112,11 +114,17 @@ class Model(metaclass=MetaModel):
 
     @classmethod
     def _get_index_sql(cls, name) -> str:
-        return f"CREATE INDEX idx_{cls.table_name()}_{name} ON {cls.table_name()} ({name})"
+        return (
+            f"CREATE INDEX idx_{cls.table_name()}_{name} ON {cls.table_name()} ({name})"
+        )
 
     @classmethod
     def _get_foreign_key_sql(cls, name, field) -> str:
-        target_table = field.to_model.__name__.lower() if not isinstance(field.to_model, str) else field.to_model.lower()
+        target_table = (
+            field.to_model.__name__.lower()
+            if not isinstance(field.to_model, str)
+            else field.to_model.lower()
+        )
         return f"FOREIGN KEY ({name}) REFERENCES {target_table}({field.related_field}) ON DELETE {field.on_delete} ON UPDATE {field.on_update}"
 
     def save(self):

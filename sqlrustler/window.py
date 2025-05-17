@@ -34,7 +34,11 @@ class Window:
                 clauses.append(self.frame)
             elif isinstance(self.frame, (list, tuple)):
                 frame_type = "ROWS"
-                if len(self.frame) == 3 and self.frame[0].upper() in ("ROWS", "RANGE", "GROUPS"):
+                if len(self.frame) == 3 and self.frame[0].upper() in (
+                    "ROWS",
+                    "RANGE",
+                    "GROUPS",
+                ):
                     frame_type = self.frame[0].upper()
                     frame = self.frame[1:]
                 frame_clause = f"{frame_type} BETWEEN {frame[0]} AND {frame[1]}"
@@ -43,4 +47,3 @@ class Window:
         parts.append(" ".join(clauses))
         parts.append(")")
         return " ".join(parts)
-

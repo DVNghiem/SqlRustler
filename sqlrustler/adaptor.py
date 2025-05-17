@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
+
 from .enum import Operator
 
 
 class DatabaseAdapter(ABC):
     """Adapter for database-specific SQL generation and operator support."""
-    
+
     @abstractmethod
     def get_placeholder(self, counter: int) -> str:
         pass
@@ -41,4 +42,3 @@ class MySqlAdapter(DatabaseAdapter):
         if op == "ILIKE":
             return "LIKE"
         return op
-
