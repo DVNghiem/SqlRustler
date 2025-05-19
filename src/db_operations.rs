@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use crate::db_impl::{
-    PostgresExecutor, PostgresFetcher, PostgresBulkUpdater,
-    MySqlExecutor, MySqlFetcher, MySqlBulkUpdater,
-    SqliteExecutor, SqliteFetcher, SqliteBulkUpdater,
+use crate::{
+    mysql::{MySqlBulkUpdater, MySqlExecutor, MySqlFetcher},
+    postgresql::{PostgresBulkUpdater, PostgresExecutor, PostgresFetcher},
+    sqlite::{SqliteBulkUpdater, SqliteExecutor, SqliteFetcher},
 };
 
 // Struct to hold database operation implementations

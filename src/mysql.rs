@@ -1,24 +1,24 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use futures::TryStreamExt;
-use pyo3::{prelude::*, types::PyDict};
-use sqlx::{MySql, Row};
+use pyo3::{prelude::*, types::PyList};
+use sqlx::{MySql, Row, Column};
 use crate::{
     db_trait::{ParameterBinder, ResultMapper, DatabaseExecutor, DatabaseFetcher, DatabaseBulkUpdater},
     transaction::Transaction,
     error::DatabaseError,
 };
 
-// MySQL Implementation
 pub struct MySqlBinder;
 
 impl ParameterBinder for MySqlBinder {
     type Arguments = sqlx::mysql::MySqlArguments;
     type Database = MySql;
 
-    fn bind_parameters(
+    fn bind_parameters<'a>(
         &self,
-        query: &str,
-        params: &[&PyAny],
-    ) -> Result<sqlx::query::Query<Self::Database, Self::Arguments>, PyErr> {
+        query: &'a str,
+        params: &'a [&'a PyAny],
+    ) -> Result<sqlx::query::Query<'a, Self::Database, Self::Arguments>, PyErr> {
         let mut q = sqlx::query(query);
         for param in params {
             if param.is_none() {
@@ -48,31 +48,40 @@ impl ResultMapper for MySqlMapper {
     type Database = MySql;
 
     fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr> {
-        let dict = PyDict::new(py);
-        for (i, col) in row.columns().iter().enumerate() {
-            let key = col.name();
-            let value: PyObject = match row.try_get::<Option<i64>, _>(i) {
-                Ok(Some(val)) => Ok(val.to_object(py)),
-                Ok(None) => Ok(py.None()),
-                Err(_) => match row.try_get::<Option<f64>, _>(i) {
-                    Ok(Some(val)) => Ok(val.to_object(py)),
-                    Ok(None) => Ok(py.None()),
-                    Err(_) => match row.try_get::<Option<&str>, _>(i) {
-                        Ok(Some(val)) => Ok(val.to_object(py)),
-                        Ok(None) => Ok(py.None()),
-                        Err(_) => match row.try_get::<Option<bool>, _>(i) {
-                            Ok(Some(val)) => Ok(val.to_object(py)),
-                            Ok(None) => Ok(py.None()),
-                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("Unsupported column type for {}", key)
-                            )),
-                        },
-                    },
-                },
-            }?;
-            dict.set_item(key, value)?;
+        // Create a list of (name, value, type) tuples for each column
+        let columns = PyList::empty(py);
+        for col in row.columns().iter() {
+            let name = col.name();
+            let col_type = col.type_info().to_string();
+            let value: PyObject = match col_type.as_str() {
+                "INT8" | "BIGINT" => row.try_get::<Option<i64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "INT4" | "INTEGER" | "SERIAL" => row.try_get::<Option<i32>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" => row.try_get::<Option<f64>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TEXT" | "VARCHAR" | "CHAR" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "BOOL" | "BOOLEAN" => row.try_get::<Option<bool>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+                "TIMESTAMP" => {
+                    row.try_get::<Option<NaiveDateTime>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S").to_string().to_object(py)))
+                }
+                "TIMESTAMPTZ" => {
+                    row.try_get::<Option<DateTime<Utc>>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%dT%H:%M:%S%Z").to_string().to_object(py)))
+                }
+                "DATE" => {
+                    row.try_get::<Option<NaiveDate>, _>(name)
+                        .map_or(py.None(), |opt| opt.map_or(py.None(), |v| v.format("%Y-%m-%d").to_string().to_object(py)))
+                }
+                "UUID" => row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py)),
+
+                _ => {
+                    // Fallback to String for unknown types
+                    row.try_get::<Option<String>, _>(name).map_or(py.None(), |v| v.to_object(py))
+                }
+            };
+            let col_tuple = (name, value, col_type).to_object(py);
+            columns.append(col_tuple)?;
         }
-        Ok(dict.to_object(py))
+        Ok(columns.to_object(py))
     }
 }
 
@@ -83,11 +92,11 @@ impl DatabaseExecutor for MySqlExecutor {
     type Arguments = sqlx::mysql::MySqlArguments;
     type ParameterBinder = MySqlBinder;
 
-    async fn execute(
+    async fn execute<'a>(
         &self,
         transaction: &mut Transaction,
-        query: &str,
-        params: &[&PyAny],
+        query: &'a str,
+        params: &'a [&'a PyAny],
     ) -> Result<u64, PyErr> {
         let binder = MySqlBinder;
         match transaction {
@@ -112,12 +121,12 @@ impl DatabaseFetcher for MySqlFetcher {
     type ParameterBinder = MySqlBinder;
     type ResultMapper = MySqlMapper;
 
-    async fn fetch_all(
+    async fn fetch_all<'a>(
         &self,
         py: Python<'_>,
         transaction: &mut Transaction,
-        query: &str,
-        params: &[&PyAny],
+        query: &'a str,
+        params: &'a [&'a PyAny],
     ) -> Result<Vec<PyObject>, PyErr> {
         let binder = MySqlBinder;
         let mapper = MySqlMapper;
@@ -137,12 +146,12 @@ impl DatabaseFetcher for MySqlFetcher {
         }
     }
 
-    async fn stream_data(
+    async fn stream_data<'a>(
         &self,
         py: Python<'_>,
         transaction: &mut Transaction,
-        query: &str,
-        params: &[&PyAny],
+        query: &'a str,
+        params: &'a [&'a PyAny],
         chunk_size: usize,
     ) -> Result<Vec<Vec<PyObject>>, PyErr> {
         let binder = MySqlBinder;
@@ -178,11 +187,11 @@ impl DatabaseBulkUpdater for MySqlBulkUpdater {
     type Arguments = sqlx::mysql::MySqlArguments;
     type ParameterBinder = MySqlBinder;
 
-    async fn bulk_change(
+    async fn bulk_change<'a>(
         &self,
         transaction: &mut Transaction,
-        query: &str,
-        params: &[Vec<&PyAny>],
+        query: &'a str,
+        params: &'a [Vec<&'a PyAny>],
         batch_size: usize,
     ) -> Result<u64, PyErr> {
         let binder = MySqlBinder;

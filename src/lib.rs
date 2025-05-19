@@ -6,8 +6,10 @@ mod db_trait;
 mod transaction;
 mod session;
 mod error;
-mod  db_impl;
 mod db_operations;
+mod postgresql;
+mod mysql;
+mod sqlite;
 
 #[pymodule]
 fn sqlrustler(_py: Python, module: &PyModule) -> PyResult<()>  {
