@@ -5,7 +5,7 @@ from .expressions import ExpressionHandler
 from .F import F
 from .Q import Q
 from .window import Window
-from .field import Field, ForeignKeyField, IntegerField, CharField, TextField, DateTimeField, BooleanField, JSONField, ArrayField, DecimalField, DateField,FloatField
+from .field import Field, ForeignKeyField, IntegerField, CharField, TextField, DateTimeField, BooleanField, JSONField, ArrayField, DecimalField, DateField, FloatField
 from .model import Model
 from .sqlrustler import DatabaseConfig, Session, DatabaseConnection
 
