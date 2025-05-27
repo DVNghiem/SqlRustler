@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, Dict, List
 
 
-class DatabaseType(Enum, str):
+class DatabaseType(str, Enum):
     Postgres = "POSTGRESQL"
     MySql = "MYSQL"
     SQLite = "SQLITE"
