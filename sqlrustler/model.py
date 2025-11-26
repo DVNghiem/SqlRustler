@@ -120,11 +120,11 @@ class Model(metaclass=MetaModel):
 
     @classmethod
     def _get_foreign_key_sql(cls, name, field) -> str:
-        target_table = (
-            field.to_model.__name__.lower()
-            if not isinstance(field.to_model, str)
-            else field.to_model.lower()
-        )
+        # Use table_name() method for consistency instead of __name__.lower()
+        if isinstance(field.to_model, str):
+            target_table = field.to_model.lower()
+        else:
+            target_table = field.to_model.table_name()
         return f"FOREIGN KEY ({name}) REFERENCES {target_table}({field.related_field}) ON DELETE {field.on_delete} ON UPDATE {field.on_update}"
 
     def save(self):
