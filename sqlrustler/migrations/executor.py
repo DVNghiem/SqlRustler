@@ -20,7 +20,7 @@ class MigrationExecutor:
         except:
             db_type = DatabaseType.Postgres # Default
             
-        with Session(self.connection_alias) as tx:
+        with Session(alias=self.connection_alias) as tx:
             # 1. Ensure migrations table exists
             self._ensure_migrations_table(tx, db_type)
             
