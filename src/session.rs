@@ -48,16 +48,25 @@ impl Session {
         _exc_tb: Option<Py<PyAny>>,
         py: Python,
     ) -> PyResult<()> {
-        if let Some(tx) = SESSION_MAP.remove(&self.context_id) {
-            py.allow_threads(|| {
+        // Always remove transaction from map to prevent memory leak
+        if let Some(tx_entry) = SESSION_MAP.remove(&self.context_id) {
+            let tx = tx_entry.1;
+            let result = py.allow_threads(|| {
                 get_runtime().block_on(async {
                     if exc_val.is_some() {
-                        tx.1.rollback().await
+                        tx.rollback().await
                     } else {
-                        tx.1.commit().await
+                        tx.commit().await
                     }
                 })
-            })?;
+            });
+            
+            // Log error but don't propagate to avoid masking original exception
+            if let Err(e) = result {
+                eprintln!("Warning: Transaction cleanup failed for session {}: {}", self.context_id, e);
+            }
+        } else {
+            eprintln!("Warning: Transaction not found in SESSION_MAP for session {}", self.context_id);
         }
         Ok(())
     }

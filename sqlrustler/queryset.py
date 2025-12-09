@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Union
 
-from .adaptor import DatabaseAdapter, MySqlAdapter, PostgresAdapter
+from .adaptor import DatabaseAdapter, MySqlAdapter, PostgresAdapter, SqliteAdapter
 from .builders import DeleteBuilder, InsertBuilder, SelectBuilder, UpdateBuilder
 from .enum import JoinType
 from .exceptions import DoesNotExist, MultipleObjectsReturned
@@ -56,6 +56,8 @@ class QuerySet:
             return PostgresAdapter()
         elif db_type == DatabaseType.MySql:
             return MySqlAdapter()
+        elif db_type == DatabaseType.Sqlite:
+            return SqliteAdapter()
         raise ValueError(f"Unsupported database type: {db_type}")
 
     def clone(self) -> "QuerySet":
@@ -307,10 +309,22 @@ class QuerySet:
         if not qs.state["order_by"]:
             qs = qs.order_by("-id")
         else:
-            qs.state["order_by"] = [
-                f"-{field}" if not field.startswith("-") else field[1:]
-                for field in qs.state["order_by"]
-            ]
+            # Reverse the order_by direction
+            reversed_order = []
+            for field in qs.state["order_by"]:
+                if isinstance(field, (F, Expression)):
+                    # For F and Expression objects, keep as is (user should handle reversal)
+                    reversed_order.append(field)
+                elif " DESC" in field:
+                    # Change DESC to ASC
+                    reversed_order.append(field.replace(" DESC", " ASC"))
+                elif " ASC" in field:
+                    # Change ASC to DESC
+                    reversed_order.append(field.replace(" ASC", " DESC"))
+                else:
+                    # No explicit direction, assume ASC and change to DESC
+                    reversed_order.append(f"{field} DESC")
+            qs.state["order_by"] = reversed_order
         result = qs.limit(1).execute()
         return result[0] if result else None
 

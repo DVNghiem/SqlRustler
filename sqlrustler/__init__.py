@@ -7,7 +7,8 @@ from .Q import Q
 from .window import Window
 from .field import Field, ForeignKeyField, IntegerField, CharField, TextField, DateTimeField, BooleanField, JSONField, ArrayField, DecimalField, DateField, FloatField
 from .model import Model
-from .sqlrustler import DatabaseConfig, Session, DatabaseConnection
+from .sqlrustler import DatabaseConfig, Session, DatabaseConnection, DatabaseType, get_db_type_with_alias
+from . import migrations
 
 __all__ = [
     "QuerySet",
@@ -36,4 +37,7 @@ __all__ = [
     "DatabaseConfig",
     "Session",
     "DatabaseConnection",
+    "DatabaseType",
+    "get_db_type_with_alias",
+    "migrations",
 ]

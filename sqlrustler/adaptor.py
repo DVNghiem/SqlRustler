@@ -42,3 +42,17 @@ class MySqlAdapter(DatabaseAdapter):
         if op == "ILIKE":
             return "LIKE"
         return op
+
+
+class SqliteAdapter(DatabaseAdapter):
+    def get_placeholder(self, counter: int) -> str:
+        return "?"
+
+    def supports_operator(self, op: str) -> bool:
+        unsupported = {"ILIKE", "~", "~*"}
+        return op not in unsupported
+
+    def format_operator(self, op: str) -> str:
+        if op == "ILIKE":
+            return "LIKE"
+        return op

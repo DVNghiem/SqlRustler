@@ -19,19 +19,31 @@ class TypeMapper(ABC):
 
 class PostgresTypeMapper(TypeMapper):
     def get_sql_type(self, field_type: str, **kwargs) -> str:
-        type_mapping = {
-            "int": "INTEGER",
-            "str": f"VARCHAR({kwargs.get('max_length', 255)})",
-            "float": "FLOAT",
-            "bool": "BOOLEAN",
-            "datetime": "TIMESTAMP",
-            "date": "DATE",
-            "text": "TEXT",
-            "json": "JSONB",
-            "array": f"{kwargs.get('base_field').sql_type()}[]",
-            "decimal": f"DECIMAL({kwargs.get('max_digits', 10)},{kwargs.get('decimal_places', 2)})",
-        }
-        return type_mapping.get(field_type, "VARCHAR(255)")
+        if field_type == "int":
+            return "INTEGER"
+        elif field_type == "str":
+            return f"VARCHAR({kwargs.get('max_length', 255)})"
+        elif field_type == "float":
+            return "FLOAT"
+        elif field_type == "bool":
+            return "BOOLEAN"
+        elif field_type == "datetime":
+            return "TIMESTAMP"
+        elif field_type == "date":
+            return "DATE"
+        elif field_type == "text":
+            return "TEXT"
+        elif field_type == "json":
+            return "JSONB"
+        elif field_type == "array":
+            base_field = kwargs.get('base_field')
+            if base_field:
+                return f"{base_field.sql_type()}[]"
+            return "TEXT[]" # Fallback
+        elif field_type == "decimal":
+            return f"DECIMAL({kwargs.get('max_digits', 10)},{kwargs.get('decimal_places', 2)})"
+        
+        return "VARCHAR(255)"
 
 
 class MySqlTypeMapper(TypeMapper):
@@ -101,6 +113,9 @@ class Field:
         auto_increment: bool = False,
         base_field: Optional["Field"] = None,
         to_model: Optional[Any] = None,  # Related model for foreign keys
+        max_length: Optional[int] = None,
+        max_digits: Optional[int] = None,
+        decimal_places: Optional[int] = None,
     ):
         self.field_type = field_type
         self.primary_key = primary_key
@@ -114,6 +129,12 @@ class Field:
         self.base_field = base_field
         self.to_model = to_model
         self.owner = None
+        self.alias = None
+        self.max_length = max_length
+        self.max_digits = max_digits
+        self.decimal_places = decimal_places
+        # Initialize type mapper - defaults to PostgreSQL if not set
+        self._type_mapper = None
 
     def validate(self, value: Any) -> None:
         """Template method for validation."""
@@ -137,8 +158,36 @@ class Field:
                     f"Validation failed for {self.name}: {str(e)}"
                 )
 
+    @property
+    def type_mapper(self) -> TypeMapper:
+        """Get or initialize the type mapper based on database type."""
+        if self._type_mapper is None:
+            # Try to get database type from alias
+            try:
+                from .sqlrustler import get_db_type_with_alias, DatabaseType
+                db_type = get_db_type_with_alias(self.alias or "default")
+                if db_type == DatabaseType.MySql:
+                    self._type_mapper = MySqlTypeMapper()
+                else:
+                    # Default to PostgreSQL for Postgres and Sqlite
+                    self._type_mapper = PostgresTypeMapper()
+            except Exception:
+                # Fallback to PostgreSQL if database type cannot be determined
+                self._type_mapper = PostgresTypeMapper()
+        return self._type_mapper
+
     def sql_type(self) -> str:
-        return self.type_mapper.get_sql_type(self.field_type)
+        """Generate SQL type string for this field."""
+        kwargs = {}
+        if self.max_length is not None:
+            kwargs['max_length'] = self.max_length
+        if self.max_digits is not None:
+            kwargs['max_digits'] = self.max_digits
+        if self.decimal_places is not None:
+            kwargs['decimal_places'] = self.decimal_places
+        if self.base_field is not None:
+            kwargs['base_field'] = self.base_field
+        return self.type_mapper.get_sql_type(self.field_type, **kwargs)
 
     def __get__(self, instance: Any, owner: Any) -> Any:
         if instance is None:
