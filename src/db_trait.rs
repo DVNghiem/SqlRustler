@@ -1,6 +1,6 @@
+use crate::transaction::Transaction;
 use pyo3::prelude::*;
 use sqlx::Database;
-use crate::transaction::Transaction;
 
 // Trait for binding parameters
 pub trait ParameterBinder {
@@ -9,8 +9,9 @@ pub trait ParameterBinder {
 
     fn bind_parameters<'a>(
         &self,
+        py: Python<'_>,
         query: &'a str,
-        params: &'a [&'a PyAny],
+        params: &'a [Py<PyAny>],
     ) -> Result<sqlx::query::Query<'a, Self::Database, Self::Arguments>, PyErr>;
 }
 
@@ -19,7 +20,7 @@ pub trait ResultMapper {
     type Row;
     type Database: Database;
 
-    fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<PyObject, PyErr>;
+    fn map_result(&self, py: Python<'_>, row: &Self::Row) -> Result<Py<PyAny>, PyErr>;
 }
 
 // Trait for executing queries (INSERT, UPDATE, DELETE)
@@ -30,9 +31,10 @@ pub trait DatabaseExecutor {
 
     async fn execute<'a>(
         &self,
+        py: Python<'_>,
         transaction: &mut Transaction,
         query: &'a str,
-        params: &'a [&'a PyAny],
+        params: &'a [Py<PyAny>],
     ) -> Result<u64, PyErr>;
 }
 
@@ -49,17 +51,17 @@ pub trait DatabaseFetcher {
         py: Python<'_>,
         transaction: &mut Transaction,
         query: &'a str,
-        params: &'a [&'a PyAny],
-    ) -> Result<Vec<PyObject>, PyErr>;
+        params: &'a [Py<PyAny>],
+    ) -> Result<Vec<Py<PyAny>>, PyErr>;
 
     async fn stream_data<'a>(
         &self,
         py: Python<'_>,
         transaction: &mut Transaction,
         query: &'a str,
-        params: &'a [&'a PyAny],
+        params: &'a [Py<PyAny>],
         chunk_size: usize,
-    ) -> Result<Vec<Vec<PyObject>>, PyErr>;
+    ) -> Result<Vec<Vec<Py<PyAny>>>, PyErr>;
 }
 
 // Trait for bulk operations
@@ -70,9 +72,10 @@ pub trait DatabaseBulkUpdater {
 
     async fn bulk_change<'a>(
         &self,
+        py: Python<'_>,
         transaction: &mut Transaction,
         query: &'a str,
-        params: &'a [Vec<&'a PyAny>],
+        params: &'a [Vec<Py<PyAny>>],
         batch_size: usize,
     ) -> Result<u64, PyErr>;
 }

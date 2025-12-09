@@ -11,8 +11,8 @@ mod postgresql;
 mod mysql;
 mod sqlite;
 
-#[pymodule]
-fn sqlrustler(_py: Python, module: &PyModule) -> PyResult<()>  {
+#[pymodule(gil_used = false)]
+fn sqlrustler(module: &Bound<'_, PyModule>) -> PyResult<()>  {
 
     module.add_class::<config::DatabaseType>()?;
     module.add_class::<config::DatabaseConfig>()?;
@@ -23,6 +23,5 @@ fn sqlrustler(_py: Python, module: &PyModule) -> PyResult<()>  {
     // add the functions to the module
     module.add_function(wrap_pyfunction!(connection::get_db_type_with_alias, module)?)?;
 
-    pyo3::prepare_freethreaded_python();
     Ok(())
 }

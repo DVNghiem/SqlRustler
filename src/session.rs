@@ -1,7 +1,7 @@
-use pyo3::prelude::*;
-use uuid::Uuid;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use pyo3::prelude::*;
+use uuid::Uuid;
 
 use crate::{
     connection::{get_connection, get_runtime},
@@ -43,9 +43,9 @@ impl Session {
 
     pub fn __exit__(
         &self,
-        _exc_type: Option<PyObject>,
-        exc_val: Option<PyObject>,
-        _exc_tb: Option<PyObject>,
+        _exc_type: Option<Py<PyAny>>,
+        exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
         py: Python,
     ) -> PyResult<()> {
         if let Some(tx) = SESSION_MAP.remove(&self.context_id) {

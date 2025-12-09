@@ -1,10 +1,10 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use sqlx::{Postgres, MySql, Sqlite};
+use sqlx::{MySql, Postgres, Sqlite};
 
 use crate::connection::get_runtime;
 use crate::db_operations::Database;
-use crate::db_trait::{DatabaseExecutor, DatabaseFetcher, DatabaseBulkUpdater};
+use crate::db_trait::{DatabaseBulkUpdater, DatabaseExecutor, DatabaseFetcher};
 use crate::error::DatabaseError;
 use crate::session::SESSION_MAP;
 
@@ -51,124 +51,140 @@ impl TransactionWrapper {
 
 #[pymethods]
 impl TransactionWrapper {
-    pub fn execute(&self, query: &str, params: Vec<&PyAny>) -> PyResult<u64> {
+    pub fn execute(&self, query: &str, params: Vec<Py<PyAny>>, py: Python) -> PyResult<u64> {
         let db = Database::new();
-        // Convert &PyAny to PyObject before entering allow_threads
+        // Convert &PyAny to Py<PyAny> before entering allow_threads
         let result = get_runtime().block_on(async move {
-           let tx_entry = SESSION_MAP
-                    .remove(&self.session_id)
-                    .ok_or(DatabaseError::TransactionNotFound)?;
-                let mut tx = tx_entry.1;
-                // Convert PyObject back to &PyAny inside the GIL scope
-                let result = match &mut tx {
-                    Transaction::Postgres(_) => {
-                        db.postgres_executor.execute(&mut tx, query, &params).await
-                    }
-                    Transaction::MySql(_) => {
-                        db.mysql_executor.execute(&mut tx, query, &params).await
-                    }
-                    Transaction::Sqlite(_) => {
-                        db.sqlite_executor.execute(&mut tx, query, &params).await
-                    }
-                };
-                SESSION_MAP.insert(self.session_id.clone(), tx);
-                result
+            let tx_entry = SESSION_MAP
+                .remove(&self.session_id)
+                .ok_or(DatabaseError::TransactionNotFound)?;
+            let mut tx = tx_entry.1;
+            // Convert Py<PyAny> back to &PyAny inside the GIL scope
+            let result = match &mut tx {
+                Transaction::Postgres(_) => {
+                    db.postgres_executor
+                        .execute(py, &mut tx, query, &params)
+                        .await
+                }
+                Transaction::MySql(_) => {
+                    db.mysql_executor.execute(py, &mut tx, query, &params).await
+                }
+                Transaction::Sqlite(_) => {
+                    db.sqlite_executor
+                        .execute(py, &mut tx, query, &params)
+                        .await
+                }
+            };
+            SESSION_MAP.insert(self.session_id.clone(), tx);
+            result
         })?;
         Ok(result)
     }
 
-    pub fn fetch_all(&self, query: &str, params: Vec<&PyAny>, py: Python) -> PyResult<Vec<PyObject>> {
+    pub fn fetch_all(
+        &self,
+        query: &str,
+        params: Vec<Py<PyAny>>,
+        py: Python,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let db = Database::new();
         let result = get_runtime().block_on(async move {
             let tx_entry = SESSION_MAP
-                    .remove(&self.session_id)
-                    .ok_or(DatabaseError::TransactionNotFound)?;
-                let mut tx = tx_entry.1;
-                let result = match &mut tx {
-                    Transaction::Postgres(_) => {
-                        db.postgres_fetcher.fetch_all(py, &mut tx, query, &params).await
-                    }
-                    Transaction::MySql(_) => {
-                        db.mysql_fetcher.fetch_all(py, &mut tx, query, &params).await
-                    }
-                    Transaction::Sqlite(_) => {
-                        db.sqlite_fetcher.fetch_all(py, &mut tx, query, &params).await
-                    }
-                };
-                SESSION_MAP.insert(self.session_id.clone(), tx);
-                result
+                .remove(&self.session_id)
+                .ok_or(DatabaseError::TransactionNotFound)?;
+            let mut tx = tx_entry.1;
+            let result = match &mut tx {
+                Transaction::Postgres(_) => {
+                    db.postgres_fetcher
+                        .fetch_all(py, &mut tx, query, &params)
+                        .await
+                }
+                Transaction::MySql(_) => {
+                    db.mysql_fetcher
+                        .fetch_all(py, &mut tx, query, &params)
+                        .await
+                }
+                Transaction::Sqlite(_) => {
+                    db.sqlite_fetcher
+                        .fetch_all(py, &mut tx, query, &params)
+                        .await
+                }
+            };
+            SESSION_MAP.insert(self.session_id.clone(), tx);
+            result
         })?;
         Ok(result)
     }
 
-    pub fn stream_data(
+    pub fn fetch_many(
         &self,
         query: &str,
-        params: Vec<&PyAny>,
+        params: Vec<Py<PyAny>>,
         chunk_size: usize,
         py: Python,
-    ) -> PyResult<Vec<Vec<PyObject>>> {
+    ) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         let db = Database::new();
         let result = get_runtime().block_on(async move {
-           let tx_entry = SESSION_MAP
-                    .remove(&self.session_id)
-                    .ok_or(DatabaseError::TransactionNotFound)?;
-                let mut tx = tx_entry.1;
-                let result = match &mut tx {
-                    Transaction::Postgres(_) => {
-                        db.postgres_fetcher
-                            .stream_data(py, &mut tx, query, &params, chunk_size)
-                            .await
-                    }
-                    Transaction::MySql(_) => {
-                        db.mysql_fetcher
-                            .stream_data(py, &mut tx, query, &params, chunk_size)
-                            .await
-                    }
-                    Transaction::Sqlite(_) => {
-                        db.sqlite_fetcher
-                            .stream_data(py, &mut tx, query, &params, chunk_size)
-                            .await
-                    }
-                };
-                SESSION_MAP.insert(self.session_id.clone(), tx);
-                result
+            let tx_entry = SESSION_MAP
+                .remove(&self.session_id)
+                .ok_or(DatabaseError::TransactionNotFound)?;
+            let mut tx = tx_entry.1;
+            let result = match &mut tx {
+                Transaction::Postgres(_) => {
+                    db.postgres_fetcher
+                        .stream_data(py, &mut tx, query, &params, chunk_size)
+                        .await
+                }
+                Transaction::MySql(_) => {
+                    db.mysql_fetcher
+                        .stream_data(py, &mut tx, query, &params, chunk_size)
+                        .await
+                }
+                Transaction::Sqlite(_) => {
+                    db.sqlite_fetcher
+                        .stream_data(py, &mut tx, query, &params, chunk_size)
+                        .await
+                }
+            };
+            SESSION_MAP.insert(self.session_id.clone(), tx);
+            result
         })?;
         Ok(result)
     }
 
-    pub fn bulk_change(
+    pub fn execute_many(
         &self,
         query: &str,
-        params: Vec<Vec<&PyAny>>,
+        params: Vec<Vec<Py<PyAny>>>,
         batch_size: usize,
+        py: Python,
     ) -> PyResult<u64> {
         let db = Database::new();
 
         let result = get_runtime().block_on(async move {
             let tx_entry = SESSION_MAP
-                    .remove(&self.session_id)
-                    .ok_or(DatabaseError::TransactionNotFound)?;
-                let mut tx = tx_entry.1;
-                let result = match &mut tx {
-                    Transaction::Postgres(_) => {
-                        db.postgres_bulk_updater
-                            .bulk_change(&mut tx, query, &params, batch_size)
-                            .await
-                    }
-                    Transaction::MySql(_) => {
-                        db.mysql_bulk_updater
-                            .bulk_change(&mut tx, query, &params, batch_size)
-                            .await
-                    }
-                    Transaction::Sqlite(_) => {
-                        db.sqlite_bulk_updater
-                            .bulk_change(&mut tx, query, &params, batch_size)
-                            .await
-                    }
-                };
-                SESSION_MAP.insert(self.session_id.clone(), tx);
-                result
+                .remove(&self.session_id)
+                .ok_or(DatabaseError::TransactionNotFound)?;
+            let mut tx = tx_entry.1;
+            let result = match &mut tx {
+                Transaction::Postgres(_) => {
+                    db.postgres_bulk_updater
+                        .bulk_change(py, &mut tx, query, &params, batch_size)
+                        .await
+                }
+                Transaction::MySql(_) => {
+                    db.mysql_bulk_updater
+                        .bulk_change(py, &mut tx, query, &params, batch_size)
+                        .await
+                }
+                Transaction::Sqlite(_) => {
+                    db.sqlite_bulk_updater
+                        .bulk_change(py, &mut tx, query, &params, batch_size)
+                        .await
+                }
+            };
+            SESSION_MAP.insert(self.session_id.clone(), tx);
+            result
         })?;
         Ok(result)
     }
