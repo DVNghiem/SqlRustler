@@ -13,9 +13,49 @@ logger = logging.getLogger(__name__)
 
 
 class ResultParser:
+    """Optimized result parser with caching and batch processing."""
+    __slots__ = ('queryset', '_field_cache', '_type_converter_cache')
+    
     def __init__(self, queryset):
         self.queryset = queryset
+        # Cache field metadata for faster lookups
+        self._field_cache = self._build_field_cache()
+        self._type_converter_cache = {}
 
+    def _build_field_cache(self) -> Dict[str, Any]:
+        """Build cache of field metadata for faster access."""
+        cache = {
+            'model_fields': self.queryset.model._fields,
+            'table_name': self.queryset.model.table_name(),
+            'field_types': {
+                name: field.field_type 
+                for name, field in self.queryset.model._fields.items()
+            }
+        }
+        return cache
+    
+    def parse_rows_batch(self, rows: List[List[Tuple[str, Any, str]]], raw: bool = False) -> List[Any]:
+        """Parse multiple rows in batch for better performance.
+        
+        This is more efficient than calling parse_row() multiple times
+        as it reuses cached metadata and reduces function call overhead.
+        """
+        if not rows:
+            return []
+        
+        # For raw results, use optimized path
+        if raw or self.queryset._raw_results:
+            return [
+                {
+                    col_name: self._convert_value(value, col_type, "str")
+                    for col_name, value, col_type in row
+                }
+                for row in rows
+            ]
+        
+        # Parse each row using cached metadata
+        return [self.parse_row(row, raw=raw) for row in rows]
+    
     def parse_row(self, row: List[Tuple[str, Any, str]], raw: bool = False) -> Any:
         """Parse a database row into a Model instance or raw dict."""
         row_dict = {col_name: (value, col_type) for col_name, value, col_type in row}

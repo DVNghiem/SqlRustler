@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List
 
@@ -16,8 +16,7 @@ class DatabaseConfig:
     max_connections: int = 10
     min_connections: int = 1
     idle_timeout: int = 30
-
-    options: Dict[str, Any] = {}
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

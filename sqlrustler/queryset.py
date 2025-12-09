@@ -49,6 +49,10 @@ class QuerySet:
         self._builder = SelectBuilder(self)
         self._parser = ResultParser(self)
         self._expression_handler = ExpressionHandler(self)
+        # Caching support
+        self._cache_enabled = False
+        self._cache_ttl = None
+        self._sql_cache = None  # Cache for built SQL
 
     def _get_adapter(self) -> DatabaseAdapter:
         db_type = get_db_type_with_alias(self.alias)
@@ -56,7 +60,7 @@ class QuerySet:
             return PostgresAdapter()
         elif db_type == DatabaseType.MySql:
             return MySqlAdapter()
-        elif db_type == DatabaseType.Sqlite:
+        elif db_type == DatabaseType.SQLite:
             return SqliteAdapter()
         raise ValueError(f"Unsupported database type: {db_type}")
 
@@ -69,7 +73,28 @@ class QuerySet:
         new_qs._prefetch_related = self._prefetch_related.copy()
         new_qs._related_joins = self._related_joins.copy()
         new_qs._raw_results = self._raw_results
+        # Copy caching settings
+        new_qs._cache_enabled = self._cache_enabled
+        new_qs._cache_ttl = self._cache_ttl
+        new_qs._sql_cache = self._sql_cache
         return new_qs
+    
+    def cache(self, timeout: int = 300) -> "QuerySet":
+        """Enable query result caching.
+        
+        Args:
+            timeout: Cache timeout in seconds (default: 300)
+            
+        Returns:
+            Cloned QuerySet with caching enabled
+            
+        Example:
+            users = User.objects().filter(status='active').cache(timeout=60).execute()
+        """
+        qs = self.clone()
+        qs._cache_enabled = True
+        qs._cache_ttl = timeout
+        return qs
 
     def raw(self) -> "QuerySet":
         """Return raw dictionaries instead of Model instances."""
@@ -380,18 +405,43 @@ class QuerySet:
         )
 
     def execute(self) -> List[Any]:
+        """Execute the query and return results.
+        
+        Uses caching if enabled via cache() method.
+        """
         sql, params = self.to_sql()
+        
+        # Try cache if enabled
+        if self._cache_enabled:
+            from .cache import get_cache
+            cache = get_cache()
+            cached_result = cache.get(sql, params)
+            if cached_result is not None:
+                return cached_result
+        
+        # Execute query
         with self.model.get_session(alias=self.alias) as tx:
             result = tx.fetch_all(sql, params)
+        
+        # Parse results
         instances = [
             self._parser.parse_row(row, raw=self._raw_results) for row in result
         ]
+        
         if self._prefetch_related and not self._raw_results:
             instances = self._parser.handle_prefetch_related(
                 instances, self._prefetch_related
             )
+        
         if hasattr(self, "_flat") and self._flat:
-            return [list(row.values())[0] for row in instances]
+            instances = [list(row.values())[0] for row in instances]
+        
+        # Cache result if enabled
+        if self._cache_enabled:
+            from .cache import get_cache
+            cache = get_cache()
+            cache.set(sql, params, instances, ttl=self._cache_ttl)
+        
         return instances
 
     def count(self) -> int:
@@ -416,21 +466,54 @@ class QuerySet:
         return bool(result)
 
     def update(self, **kwargs) -> int:
+        """Update records matching the query.
+        
+        Automatically invalidates cache for the table.
+        """
         qs = self.clone()
         qs._builder = UpdateBuilder(qs)
-        return qs._builder.execute_update(kwargs)
+        result = qs._builder.execute_update(kwargs)
+        
+        # Invalidate cache for this table
+        from .cache import get_cache
+        cache = get_cache()
+        cache.invalidate_pattern(self.model.table_name())
+        
+        return result
 
     def delete(self) -> int:
+        """Delete records matching the query.
+        
+        Automatically invalidates cache for the table.
+        """
         qs = self.clone()
         qs._builder = DeleteBuilder(qs)
-        return qs._builder.execute_delete()
+        result = qs._builder.execute_delete()
+        
+        # Invalidate cache for this table
+        from .cache import get_cache
+        cache = get_cache()
+        cache.invalidate_pattern(self.model.table_name())
+        
+        return result
 
     def bulk_create(
         self, objs: List[Any], batch_size: Optional[int] = None
     ) -> Optional[int]:
+        """Bulk create objects.
+        
+        Automatically invalidates cache for the table.
+        """
         qs = self.clone()
         qs._builder = InsertBuilder(qs)
-        return qs._builder.execute_bulk_create(objs, batch_size)
+        result = qs._builder.execute_bulk_create(objs, batch_size)
+        
+        # Invalidate cache for this table
+        from .cache import get_cache
+        cache = get_cache()
+        cache.invalidate_pattern(self.model.table_name())
+        
+        return result
 
     def to_sql(self) -> tuple[str, List[Any]]:
         return self._builder.build_sql()
@@ -459,3 +542,98 @@ class QuerySet:
         with self.model.get_session(alias=self.alias) as tx:
             result = tx.fetch_all(explain_sql, params)
         return result
+
+    def in_bulk(self, id_list: Optional[List[Any]] = None, field_name: str = "id") -> Dict[Any, Any]:
+        """Return a dictionary mapping field values to model instances.
+        
+        Args:
+            id_list: Optional list of IDs to filter by
+            field_name: Field to use as dictionary key (default: 'id')
+            
+        Returns:
+            Dictionary of {field_value: instance}
+            
+        Example:
+            users_dict = User.objects().in_bulk([1, 2, 3])
+            # {1: <User id=1>, 2: <User id=2>, 3: <User id=3>}
+        """
+        qs = self.clone()
+        if id_list is not None:
+            qs = qs.filter(**{f"{field_name}__in": id_list})
+        
+        results = qs.execute()
+        return {getattr(obj, field_name): obj for obj in results}
+
+    def earliest(self, *fields: str) -> Optional[Any]:
+        """Get the earliest object by the specified field(s).
+        
+        Args:
+            *fields: Field names to order by (defaults to 'created_at' if not specified)
+            
+        Returns:
+            The earliest instance or None
+            
+        Example:
+            earliest_user = User.objects().earliest('created_at')
+            # Or with smart default:
+            earliest_user = User.objects().earliest()  # Uses 'created_at'
+        """
+        if not fields:
+            # Try common timestamp field names
+            for field_name in ['created_at', 'created', 'date_created', 'timestamp']:
+                if field_name in self.model._fields:
+                    fields = (field_name,)
+                    break
+            if not fields:
+                # Fallback to id
+                fields = ('id',)
+        
+        return self.order_by(*fields).first()
+
+    def latest(self, *fields: str) -> Optional[Any]:
+        """Get the latest object by the specified field(s).
+        
+        Args:
+            *fields: Field names to order by (defaults to 'created_at' if not specified)
+            
+        Returns:
+            The latest instance or None
+            
+        Example:
+            latest_user = User.objects().latest('created_at')
+            # Or with smart default:
+            latest_user = User.objects().latest()  # Uses 'created_at'
+        """
+        if not fields:
+            # Try common timestamp field names
+            for field_name in ['created_at', 'created', 'date_created', 'timestamp']:
+                if field_name in self.model._fields:
+                    fields = (f"-{field_name}",)  # Descending order
+                    break
+            if not fields:
+                # Fallback to id
+                fields = ('-id',)
+        else:
+            # Add minus prefix for descending order
+            fields = tuple(f"-{f}" if not f.startswith('-') else f[1:] for f in fields)
+        
+        return self.order_by(*fields).first()
+
+    def __repr__(self) -> str:
+        """Return a readable representation of the QuerySet.
+        
+        Shows the SQL query (truncated) for debugging purposes.
+        """
+        try:
+            sql, params = self.to_sql()
+            # Truncate long SQL
+            sql_preview = sql[:100] + "..." if len(sql) > 100 else sql
+            # Show param count
+            param_info = f", {len(params)} params" if params else ""
+            return f"<QuerySet [{self.model.__name__}]: {sql_preview}{param_info}>"
+        except Exception:
+            return f"<QuerySet [{self.model.__name__}]>"
+
+    def __str__(self) -> str:
+        """Return string representation showing query details."""
+        return self.__repr__()

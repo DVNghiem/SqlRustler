@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .field import Field, ForeignKeyField
 from .queryset import QuerySet
@@ -127,8 +127,90 @@ class Model(metaclass=MetaModel):
             target_table = field.to_model.table_name()
         return f"FOREIGN KEY ({name}) REFERENCES {target_table}({field.related_field}) ON DELETE {field.on_delete} ON UPDATE {field.on_update}"
 
-    def save(self):
+    def save(self) -> None:
+        """Save the current instance to the database."""
         for name, value in self._data.items():
             self._fields[name].validate(value)
         query_object = QuerySet(self, alias=self._alias)
         query_object.bulk_create([self])
+
+    @classmethod
+    def create(cls, **kwargs: Any) -> "Model":
+        """Create and save a new instance in one step.
+        
+        Args:
+            **kwargs: Field values for the new instance
+            
+        Returns:
+            The created and saved instance
+            
+        Example:
+            user = User.create(name="John", email="john@example.com")
+        """
+        instance = cls(**kwargs)
+        instance.save()
+        return instance
+
+    @classmethod
+    def get_or_create(cls, defaults: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Tuple["Model", bool]:
+        """Get an existing instance or create a new one.
+        
+        Args:
+            defaults: Field values to use when creating a new instance
+            **kwargs: Field values to use for lookup
+            
+        Returns:
+            Tuple of (instance, created) where created is True if a new instance was created
+            
+        Example:
+            user, created = User.get_or_create(
+                email="john@example.com",
+                defaults={"name": "John Doe"}
+            )
+        """
+        from .exceptions import DoesNotExist
+        
+        try:
+            instance = cls.objects().filter(**kwargs).get()
+            return instance, False
+        except DoesNotExist:
+            create_kwargs = kwargs.copy()
+            if defaults:
+                create_kwargs.update(defaults)
+            instance = cls.create(**create_kwargs)
+            return instance, True
+
+    @classmethod
+    def update_or_create(cls, defaults: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Tuple["Model", bool]:
+        """Update an existing instance or create a new one.
+        
+        Args:
+            defaults: Field values to update/create with
+            **kwargs: Field values to use for lookup
+            
+        Returns:
+            Tuple of (instance, created) where created is True if a new instance was created
+            
+        Example:
+            user, created = User.update_or_create(
+                email="john@example.com",
+                defaults={"name": "John Smith", "is_active": True}
+            )
+        """
+        from .exceptions import DoesNotExist
+        
+        try:
+            instance = cls.objects().filter(**kwargs).get()
+            # Update the instance with defaults
+            if defaults:
+                for key, value in defaults.items():
+                    if key in cls._fields:
+                        instance._data[key] = value
+                instance.save()
+            return instance, False
+        except DoesNotExist:
+            create_kwargs = kwargs.copy()
+            if defaults:
+                create_kwargs.update(defaults)
+            instance = cls.create(**create_kwargs)
+            return instance, True

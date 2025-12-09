@@ -2,7 +2,7 @@ import json
 from abc import ABC, abstractmethod
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from sqlrustler.exceptions import DBFieldValidationError, DoesNotExist
 
@@ -109,20 +109,26 @@ class Field:
         default: Any = None,
         unique: bool = False,
         index: bool = False,
-        validators: Optional[list] = None,
+        validators: Optional[List] = None,
         auto_increment: bool = False,
         base_field: Optional["Field"] = None,
         to_model: Optional[Any] = None,  # Related model for foreign keys
         max_length: Optional[int] = None,
         max_digits: Optional[int] = None,
         decimal_places: Optional[int] = None,
+        # New usability parameters
+        help_text: str = "",
+        verbose_name: str = "",
+        choices: Optional[List[Tuple[Any, str]]] = None,
+        db_index: bool = False,
+        editable: bool = True,
     ):
         self.field_type = field_type
         self.primary_key = primary_key
         self.null = null
         self.default = default
         self.unique = unique
-        self.index = index
+        self.index = index or db_index  # db_index is an alias for index
         self.validators = validators or []
         self.name = None
         self.auto_increment = auto_increment
@@ -133,6 +139,12 @@ class Field:
         self.max_length = max_length
         self.max_digits = max_digits
         self.decimal_places = decimal_places
+        # New usability attributes
+        self.help_text = help_text
+        self.verbose_name = verbose_name  # Will be set properly when name is assigned
+        self.choices = choices
+        self.db_index = db_index
+        self.editable = editable
         # Initialize type mapper - defaults to PostgreSQL if not set
         self._type_mapper = None
 
@@ -140,8 +152,18 @@ class Field:
         """Template method for validation."""
         if value is None:
             if not self.null:
-                raise DBFieldValidationError(f"Field {self.name} cannot be null")
+                raise DBFieldValidationError(
+                    f"Field {self.verbose_name or self.name} cannot be null"
+                )
             return
+        # Validate choices if specified
+        if self.choices is not None:
+            valid_values = [choice[0] for choice in self.choices]
+            if value not in valid_values:
+                choice_display = ", ".join(str(v) for v in valid_values)
+                raise DBFieldValidationError(
+                    f"Field {self.verbose_name or self.name} must be one of: {choice_display}"
+                )
         self._validate_type(value)
         self._run_validators(value)
 
