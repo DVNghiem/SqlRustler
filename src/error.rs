@@ -8,6 +8,8 @@ pub enum DatabaseError {
     NotConnected,
     TransactionNotFound,
     ConnectionPoolExhausted,
+    ConnectionTimeout,
+    HealthCheckFailed,
     QueryTimeout,
     InvalidQuery(String),
     SerializationError(String),
@@ -22,7 +24,9 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::Configuration(e) => write!(f, "Configuration error: {}", e),
             DatabaseError::NotConnected => write!(f, "No database connection available. Please call DatabaseConnection.connect() first."),
             DatabaseError::TransactionNotFound => write!(f, "Transaction not found. The transaction may have already been committed or rolled back."),
-            DatabaseError::ConnectionPoolExhausted => write!(f, "Connection pool exhausted. Consider increasing max_connections."),
+            DatabaseError::ConnectionPoolExhausted => write!(f, "Connection pool exhausted. All connections are in use. Consider increasing max_connections or reducing acquire_timeout."),
+            DatabaseError::ConnectionTimeout => write!(f, "Connection acquisition timeout. The pool could not provide a connection within the configured acquire_timeout."),
+            DatabaseError::HealthCheckFailed => write!(f, "Health check failed. The connection pool may be unhealthy."),
             DatabaseError::QueryTimeout => write!(f, "Query execution timeout exceeded."),
             DatabaseError::InvalidQuery(msg) => write!(f, "Invalid query: {}", msg),
             DatabaseError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
@@ -43,9 +47,15 @@ impl From<SqlxError> for DatabaseError {
 impl From<DatabaseError> for PyErr {
     fn from(err: DatabaseError) -> PyErr {
         match err {
-            DatabaseError::NotConnected => pyo3::exceptions::PyConnectionError::new_err(err.to_string()),
-            DatabaseError::Configuration(_) => pyo3::exceptions::PyValueError::new_err(err.to_string()),
-            DatabaseError::InvalidQuery(_) => pyo3::exceptions::PyValueError::new_err(err.to_string()),
+            DatabaseError::NotConnected => {
+                pyo3::exceptions::PyConnectionError::new_err(err.to_string())
+            }
+            DatabaseError::Configuration(_) => {
+                pyo3::exceptions::PyValueError::new_err(err.to_string())
+            }
+            DatabaseError::InvalidQuery(_) => {
+                pyo3::exceptions::PyValueError::new_err(err.to_string())
+            }
             _ => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
         }
     }
