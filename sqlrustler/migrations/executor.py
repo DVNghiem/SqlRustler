@@ -53,7 +53,7 @@ class MigrationExecutor:
     def _ensure_migrations_table(self, tx, db_type):
         from sqlrustler import DatabaseType
         
-        if db_type == DatabaseType.Sqlite:
+        if db_type == DatabaseType.SQLite:
             id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
         else:
             id_type = "SERIAL PRIMARY KEY"
