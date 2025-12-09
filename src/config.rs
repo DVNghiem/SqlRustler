@@ -46,6 +46,12 @@ pub struct DatabaseConfig {
     pub min_connections: u32,
     #[pyo3(get, set)]
     pub idle_timeout: u64,
+    #[pyo3(get, set)]
+    pub acquire_timeout: u64,
+    #[pyo3(get, set)]
+    pub max_lifetime: u64,
+    #[pyo3(get, set)]
+    pub test_before_acquire: bool,
 }
 
 #[pymethods]
@@ -57,13 +63,19 @@ impl DatabaseConfig {
         max_connections: Option<u32>,
         min_connections: Option<u32>,
         idle_timeout: Option<u64>,
+        acquire_timeout: Option<u64>,
+        max_lifetime: Option<u64>,
+        test_before_acquire: Option<bool>,
     ) -> Self {
         DatabaseConfig {
             driver,
             url,
-            max_connections: max_connections.unwrap_or(10),
+            max_connections: max_connections.unwrap_or(20),
             min_connections: min_connections.unwrap_or(1),
-            idle_timeout: idle_timeout.unwrap_or(600),
+            idle_timeout: idle_timeout.unwrap_or(300),
+            acquire_timeout: acquire_timeout.unwrap_or(30),
+            max_lifetime: max_lifetime.unwrap_or(1800),
+            test_before_acquire: test_before_acquire.unwrap_or(true),
         }
     }
 
@@ -72,9 +84,12 @@ impl DatabaseConfig {
         DatabaseConfig {
             driver: DatabaseType::Postgres,
             url,
-            max_connections: 10,
+            max_connections: 20,
             min_connections: 1,
-            idle_timeout: 600,
+            idle_timeout: 300,
+            acquire_timeout: 30,
+            max_lifetime: 1800,
+            test_before_acquire: true,
         }
     }
 
@@ -83,9 +98,12 @@ impl DatabaseConfig {
         DatabaseConfig {
             driver: DatabaseType::MySql,
             url,
-            max_connections: 10,
+            max_connections: 20,
             min_connections: 1,
-            idle_timeout: 600,
+            idle_timeout: 300,
+            acquire_timeout: 30,
+            max_lifetime: 1800,
+            test_before_acquire: true,
         }
     }
 
@@ -94,9 +112,12 @@ impl DatabaseConfig {
         DatabaseConfig {
             driver: DatabaseType::Sqlite,
             url,
-            max_connections: 10,
+            max_connections: 20,
             min_connections: 1,
-            idle_timeout: 600,
+            idle_timeout: 300,
+            acquire_timeout: 30,
+            max_lifetime: 1800,
+            test_before_acquire: true,
         }
     }
 }
@@ -105,37 +126,51 @@ impl DatabaseConfig {
     pub async fn create_pool(&self) -> Result<DatabasePool, crate::error::DatabaseError> {
         match self.driver {
             DatabaseType::Postgres => {
-                let options = self
-                    .url
-                    .parse::<PgConnectOptions>()?;
-                let pool = PgPoolOptions::new()
+                let options = self.url.parse::<PgConnectOptions>()?;
+                let mut pool_options = PgPoolOptions::new()
                     .max_connections(self.max_connections)
                     .min_connections(self.min_connections)
                     .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-                    .acquire_timeout(Duration::from_secs(self.idle_timeout))
-                    .connect_with(options)
-                    .await?;
+                    .acquire_timeout(Duration::from_secs(self.acquire_timeout))
+                    .max_lifetime(Some(Duration::from_secs(self.max_lifetime)));
+
+                if self.test_before_acquire {
+                    pool_options = pool_options.test_before_acquire(true);
+                }
+
+                let pool = pool_options.connect_with(options).await?;
                 Ok(DatabasePool::Postgres(pool))
             }
             DatabaseType::MySql => {
                 let options = self.url.parse::<MySqlConnectOptions>()?;
-                let pool = MySqlPoolOptions::new()
+                let mut pool_options = MySqlPoolOptions::new()
                     .max_connections(self.max_connections)
                     .min_connections(self.min_connections)
                     .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-                    .acquire_timeout(Duration::from_secs(self.idle_timeout))
-                    .connect_with(options)
-                    .await?;
+                    .acquire_timeout(Duration::from_secs(self.acquire_timeout))
+                    .max_lifetime(Some(Duration::from_secs(self.max_lifetime)));
+
+                if self.test_before_acquire {
+                    pool_options = pool_options.test_before_acquire(true);
+                }
+
+                let pool = pool_options.connect_with(options).await?;
                 Ok(DatabasePool::MySql(pool))
             }
             DatabaseType::Sqlite => {
                 let options = self.url.parse::<SqliteConnectOptions>()?;
-                let pool = SqlitePoolOptions::new()
+                let mut pool_options = SqlitePoolOptions::new()
                     .max_connections(self.max_connections)
                     .min_connections(self.min_connections)
                     .idle_timeout(Some(Duration::from_secs(self.idle_timeout)))
-                    .connect_with(options)
-                    .await?;
+                    .acquire_timeout(Duration::from_secs(self.acquire_timeout))
+                    .max_lifetime(Some(Duration::from_secs(self.max_lifetime)));
+
+                if self.test_before_acquire {
+                    pool_options = pool_options.test_before_acquire(true);
+                }
+
+                let pool = pool_options.connect_with(options).await?;
                 Ok(DatabasePool::Sqlite(pool))
             }
         }

@@ -1,8 +1,8 @@
 use dashmap::DashMap;
-use pyo3::prelude::*;
 use once_cell::sync::OnceCell;
-use tokio::runtime::Runtime;
+use pyo3::prelude::*;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 use crate::{
     config::{DatabaseConfig, DatabasePool, DatabaseType},
@@ -45,13 +45,59 @@ impl Connection {
             }
         }
     }
+
+    /// Perform a health check on the connection pool
+    pub async fn health_check(&self) -> Result<(), DatabaseError> {
+        match &self.pool {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query("SELECT 1").execute(pool).await?;
+                Ok(())
+            }
+            DatabasePool::MySql(pool) => {
+                sqlx::query("SELECT 1").execute(pool).await?;
+                Ok(())
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query("SELECT 1").execute(pool).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Get the current pool size (number of connections)
+    pub fn get_pool_size(&self) -> u32 {
+        match &self.pool {
+            DatabasePool::Postgres(pool) => pool.size(),
+            DatabasePool::MySql(pool) => pool.size(),
+            DatabasePool::Sqlite(pool) => pool.size(),
+        }
+    }
+
+    /// Get the number of idle connections in the pool
+    pub fn get_idle_connections(&self) -> usize {
+        match &self.pool {
+            DatabasePool::Postgres(pool) => pool.num_idle(),
+            DatabasePool::MySql(pool) => pool.num_idle(),
+            DatabasePool::Sqlite(pool) => pool.num_idle(),
+        }
+    }
+
+    /// Close the connection pool gracefully
+    pub async fn close_pool(&self) {
+        match &self.pool {
+            DatabasePool::Postgres(pool) => pool.close().await,
+            DatabasePool::MySql(pool) => pool.close().await,
+            DatabasePool::Sqlite(pool) => pool.close().await,
+        }
+    }
 }
 pub fn get_connection(alias: &str) -> Result<Arc<Connection>, DatabaseError> {
     CONNECTION
         .get()
         .ok_or(DatabaseError::NotConnected)
         .and_then(|conn_map| {
-            conn_map.get(alias)
+            conn_map
+                .get(alias)
                 .map(|c| Arc::clone(&c))
                 .ok_or(DatabaseError::NotConnected)
         })
@@ -60,7 +106,9 @@ pub fn get_connection(alias: &str) -> Result<Arc<Connection>, DatabaseError> {
 pub fn set_connection(connection: Connection, alias: String) -> Result<(), DatabaseError> {
     let conn_map = CONNECTION.get_or_init(|| DashMap::new());
     if conn_map.contains_key(&alias) {
-        return Err(DatabaseError::Configuration("Connection already set".into()));
+        return Err(DatabaseError::Configuration(
+            "Connection already set".into(),
+        ));
     }
     conn_map.insert(alias, Arc::new(connection));
     Ok(())
@@ -69,7 +117,9 @@ pub fn set_connection(connection: Connection, alias: String) -> Result<(), Datab
 fn set_db_type_with_alias(db_type: DatabaseType, alias: String) -> Result<(), DatabaseError> {
     let db_type_map = DB_TYPE_WITH_ALIAS.get_or_init(|| DashMap::new());
     if db_type_map.contains_key(&alias) {
-        return Err(DatabaseError::Configuration("Database type already set".into()));
+        return Err(DatabaseError::Configuration(
+            "Database type already set".into(),
+        ));
     }
     db_type_map.insert(alias, db_type);
     Ok(())
@@ -81,7 +131,8 @@ pub fn get_db_type_with_alias(alias: &str) -> Result<DatabaseType, DatabaseError
         .get()
         .ok_or(DatabaseError::NotConnected)
         .and_then(|db_map| {
-            db_map.get(alias)
+            db_map
+                .get(alias)
                 .map(|db| db.clone())
                 .ok_or(DatabaseError::NotConnected)
         })
@@ -100,6 +151,31 @@ impl DatabaseConnection {
         })?;
         set_connection(connection, alias.clone())?;
         set_db_type_with_alias(config.driver, alias.clone())?;
+        Ok(())
+    }
+
+    #[staticmethod]
+    pub fn health_check(alias: Option<String>, py: Python) -> PyResult<()> {
+        let alias = alias.unwrap_or_else(|| "default".to_string());
+        let connection = get_connection(&alias)?;
+        py.allow_threads(|| get_runtime().block_on(async { connection.health_check().await }))?;
+        Ok(())
+    }
+
+    #[staticmethod]
+    pub fn get_pool_stats(alias: Option<String>) -> PyResult<(u32, usize)> {
+        let alias = alias.unwrap_or_else(|| "default".to_string());
+        let connection = get_connection(&alias)?;
+        let size = connection.get_pool_size();
+        let idle = connection.get_idle_connections();
+        Ok((size, idle))
+    }
+
+    #[staticmethod]
+    pub fn close(alias: Option<String>, py: Python) -> PyResult<()> {
+        let alias = alias.unwrap_or_else(|| "default".to_string());
+        let connection = get_connection(&alias)?;
+        py.allow_threads(|| get_runtime().block_on(async { connection.close_pool().await }));
         Ok(())
     }
 }
