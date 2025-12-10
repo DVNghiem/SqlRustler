@@ -74,7 +74,7 @@ from sqlrustler.sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnecti
 
 config = DatabaseConfig(
     driver=DatabaseType.Postgres,
-    url="postgresql://user:password@localhost:5432/mms_stag_v2",
+    url="postgresql://user:password@localhost:5432/stag_v2",
     max_connections=10,
     min_connections=1,
     idle_timeout=30,

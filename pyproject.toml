@@ -22,3 +22,11 @@ name = "sqlrustler"
 version = "0.1.0"
 description = "A lightweight, high-performance Object-Relational Mapping (ORM) library for Python"
 authors = ["Martin Dang <vannghiem848@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+[tool.poetry.group.dev.dependencies]
+mkdocs = "*"
+mkdocs-material = "*"
+mkdocstrings = {extras = ["python"], version = "*"}

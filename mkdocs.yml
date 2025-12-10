@@ -1,0 +1,35 @@
+site_name: SqlRustler
+site_description: A lightweight, high-performance Object-Relational Mapping (ORM) library for Python
+
+theme:
+  name: material
+  palette:
+    primary: blue
+    accent: blue
+
+plugins:
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+
+nav:
+  - Home: index.md
+  - Quick Reference: quickref.md
+  - Installation: installation.md
+  - Quick Start: quickstart.md
+  - User Guides:
+    - Database Setup: database-setup.md
+    - Defining Models: models.md
+    - Querying Data: querying.md
+    - Migrations: migrations.md
+    - Common Patterns: patterns.md
+    - Advanced Features: advanced.md
+  - Usage Examples: usage.md
+  - Troubleshooting: troubleshooting.md
+  - API Reference: api.md
+  - Contributing: contributing.md
+  - License: license.md
