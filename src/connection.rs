@@ -146,7 +146,7 @@ impl DatabaseConnection {
     #[staticmethod]
     pub fn connect(config: DatabaseConfig, alias: Option<String>, py: Python) -> PyResult<()> {
         let alias = alias.unwrap_or_else(|| "default".to_string());
-        let connection = py.allow_threads(|| {
+        let connection = py.detach(|| {
             get_runtime().block_on(async { Connection::new(config.clone()).await })
         })?;
         set_connection(connection, alias.clone())?;
@@ -158,7 +158,7 @@ impl DatabaseConnection {
     pub fn health_check(alias: Option<String>, py: Python) -> PyResult<()> {
         let alias = alias.unwrap_or_else(|| "default".to_string());
         let connection = get_connection(&alias)?;
-        py.allow_threads(|| get_runtime().block_on(async { connection.health_check().await }))?;
+        py.detach(|| get_runtime().block_on(async { connection.health_check().await }))?;
         Ok(())
     }
 
@@ -175,7 +175,7 @@ impl DatabaseConnection {
     pub fn close(alias: Option<String>, py: Python) -> PyResult<()> {
         let alias = alias.unwrap_or_else(|| "default".to_string());
         let connection = get_connection(&alias)?;
-        py.allow_threads(|| get_runtime().block_on(async { connection.close_pool().await }));
+        py.detach(|| get_runtime().block_on(async { connection.close_pool().await }));
         Ok(())
     }
 }

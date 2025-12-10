@@ -37,7 +37,7 @@ impl ParameterBinder for PostgresBinder {
                 q = q.bind(val.to_string());
             } else if let Ok(val) = param.extract::<bool>() {
                 q = q.bind(val);
-            } else if let Ok(list) = param.downcast::<PyList>() {
+            } else if let Ok(list) = param.cast::<PyList>() {
                 let vec: Vec<String> = list.extract()?;
                 q = q.bind(vec);
             } else if let Ok(json) = param.str()?.to_string().parse::<JsonValue>() {

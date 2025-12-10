@@ -34,7 +34,7 @@ impl Session {
 
     pub fn __enter__(&self, py: Python) -> PyResult<TransactionWrapper> {
         let connection = get_connection(&self.alias)?;
-        let tx = py.allow_threads(|| {
+        let tx = py.detach(|| {
             get_runtime().block_on(async { connection.begin_transaction().await })
         })?;
         SESSION_MAP.insert(self.context_id.clone(), tx);
@@ -51,7 +51,7 @@ impl Session {
         // Always remove transaction from map to prevent memory leak
         if let Some(tx_entry) = SESSION_MAP.remove(&self.context_id) {
             let tx = tx_entry.1;
-            let result = py.allow_threads(|| {
+            let result = py.detach(|| {
                 get_runtime().block_on(async {
                     if exc_val.is_some() {
                         tx.rollback().await
