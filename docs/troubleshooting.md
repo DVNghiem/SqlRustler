@@ -248,7 +248,7 @@ Common issues and their solutions when using SqlRustler.
    ```python
    # In your application startup
    from models import User, Post  # Import models
-   from sqlrustler.sqlrustler import DatabaseConnection
+   from sqlrustler import DatabaseConnection
    
    config = DatabaseConfig(...)
    DatabaseConnection.connect(config)

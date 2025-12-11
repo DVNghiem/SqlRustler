@@ -70,7 +70,7 @@ class ResPartner(Model):
 Configure and connect to your database:
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
+from sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
 
 config = DatabaseConfig(
     driver=DatabaseType.Postgres,

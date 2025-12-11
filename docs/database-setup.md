@@ -7,7 +7,7 @@ This guide covers setting up database connections and configuration in SqlRustle
 ### Basic Setup
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
+from sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
 
 # PostgreSQL
 config = DatabaseConfig(
@@ -73,7 +73,7 @@ config = DatabaseConfig(
 You can configure multiple database aliases:
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Primary database
 primary_config = DatabaseConfig(
@@ -103,7 +103,7 @@ Store sensitive configuration in environment variables:
 
 ```python
 import os
-from sqlrustler.sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
+from sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
 
 config = DatabaseConfig(
     driver=DatabaseType.Postgres,
@@ -140,7 +140,7 @@ except Exception as e:
 ### Health Check
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Perform health check
 is_healthy = DatabaseConnection.is_healthy()
@@ -232,7 +232,7 @@ DatabaseConnection.connect(config)
 ### Initialization
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Initialize connection at application startup
 config = DatabaseConfig(...)
@@ -249,7 +249,7 @@ DatabaseConnection.disconnect()
 ### Context Manager
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Automatic cleanup
 with DatabaseConnection(config) as conn:

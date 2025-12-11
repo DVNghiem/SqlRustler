@@ -124,7 +124,7 @@ results = User.objects().raw(
 Execute multiple operations atomically:
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Using context manager (recommended)
 with DatabaseConnection.transaction():
@@ -215,7 +215,7 @@ for stat in stats:
 ### Multiple Connections
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Main database
 main_config = DatabaseConfig(
@@ -335,7 +335,7 @@ def fetch_users():
 ### Connection Recovery
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 def ensure_connected():
     """Reconnect if connection is lost"""

@@ -293,7 +293,7 @@ except ValueError as e:
 ### Transactional Operations
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 # Wrap operations in transaction
 with DatabaseConnection.transaction():

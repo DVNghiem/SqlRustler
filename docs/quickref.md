@@ -5,7 +5,7 @@ A quick lookup guide for common SqlRustler operations.
 ## Setup
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
+from sqlrustler import DatabaseConfig, DatabaseType, DatabaseConnection
 from sqlrustler.model import Model
 from sqlrustler.field import IntegerField, TextField, ForeignKeyField
 
@@ -184,7 +184,7 @@ User.objects().filter(phone__isnull=False).execute()
 ## Transactions
 
 ```python
-from sqlrustler.sqlrustler import DatabaseConnection
+from sqlrustler import DatabaseConnection
 
 with DatabaseConnection.transaction():
     user = User(name="John")
